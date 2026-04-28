@@ -1,0 +1,14 @@
+[project]
+name = "ciudad3d-mcp"
+version = "0.1.0"
+description = "MCP server + chat web para datos urbanísticos y catastrales de CABA."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "anthropic>=0.40.0",
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "httpx>=0.28.1",
+    "pydantic>=2.9.0",
+    "mcp[cli]>=1.27.0",
+]
