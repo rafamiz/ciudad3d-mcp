@@ -4,6 +4,8 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Ciudad 3D · Asistente urbanístico CABA</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+        integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
   <style>
     :root {
       --bg: #0f1115;
@@ -81,6 +83,98 @@
       align-self: flex-start;
       background: var(--assistant);
       border: 1px solid var(--border);
+      white-space: normal;
+    }
+    /* Markdown rendering en mensajes del asistente */
+    .msg.assistant > *:first-child { margin-top: 0; }
+    .msg.assistant > *:last-child { margin-bottom: 0; }
+    .msg.assistant h1,
+    .msg.assistant h2,
+    .msg.assistant h3,
+    .msg.assistant h4 {
+      margin: 14px 0 6px;
+      font-weight: 600;
+      line-height: 1.25;
+    }
+    .msg.assistant h1 { font-size: 18px; }
+    .msg.assistant h2 { font-size: 16px; color: var(--accent); }
+    .msg.assistant h3 { font-size: 15px; color: var(--text); }
+    .msg.assistant h4 { font-size: 14px; color: var(--muted); }
+    .msg.assistant p { margin: 6px 0; }
+    .msg.assistant ul,
+    .msg.assistant ol {
+      margin: 6px 0;
+      padding-left: 22px;
+    }
+    .msg.assistant li { margin: 2px 0; }
+    .msg.assistant strong { color: #fff; }
+    .msg.assistant em { color: var(--muted); }
+    .msg.assistant a {
+      color: var(--accent);
+      text-decoration: none;
+      border-bottom: 1px dotted var(--accent);
+    }
+    .msg.assistant a:hover { color: var(--accent-2); }
+    .msg.assistant code {
+      background: var(--panel);
+      padding: 1px 6px;
+      border-radius: 4px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 13px;
+      color: #ffd866;
+    }
+    .msg.assistant pre {
+      background: var(--panel);
+      padding: 10px 12px;
+      border-radius: 6px;
+      overflow-x: auto;
+      margin: 8px 0;
+      border: 1px solid var(--border);
+    }
+    .msg.assistant pre code {
+      background: transparent;
+      padding: 0;
+      color: var(--text);
+      font-size: 13px;
+    }
+    .msg.assistant blockquote {
+      border-left: 3px solid var(--accent);
+      padding: 4px 12px;
+      margin: 8px 0;
+      color: var(--muted);
+      background: rgba(91, 141, 239, 0.06);
+    }
+    .msg.assistant hr {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 14px 0;
+    }
+    .msg.assistant table {
+      border-collapse: collapse;
+      margin: 10px 0;
+      font-size: 14px;
+      width: 100%;
+      max-width: 100%;
+      display: block;
+      overflow-x: auto;
+    }
+    .msg.assistant table thead {
+      background: var(--panel);
+    }
+    .msg.assistant table th,
+    .msg.assistant table td {
+      border: 1px solid var(--border);
+      padding: 8px 10px;
+      text-align: left;
+      vertical-align: top;
+    }
+    .msg.assistant table th {
+      color: var(--accent);
+      font-weight: 600;
+      white-space: nowrap;
+    }
+    .msg.assistant table tr:nth-child(even) td {
+      background: rgba(255, 255, 255, 0.02);
     }
     .msg.system {
       align-self: center;
@@ -102,6 +196,64 @@
       font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     }
     .tools b { color: var(--accent); }
+    .tools .tool-line { display: flex; align-items: center; gap: 6px; padding: 2px 0; }
+    .tools .tool-line .spinner {
+      width: 10px; height: 10px;
+      border: 2px solid var(--border);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+      flex-shrink: 0;
+    }
+    .tools .tool-line.done .spinner {
+      border: none;
+      width: 10px; height: 10px;
+      background: var(--ok);
+      border-radius: 50%;
+      animation: none;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* Galería de fotos */
+    .photos {
+      align-self: flex-start;
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+      gap: 6px;
+      max-width: 85%;
+      width: 100%;
+    }
+    .photos a {
+      display: block;
+      overflow: hidden;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      transition: transform 0.15s;
+    }
+    .photos a:hover { transform: scale(1.02); border-color: var(--accent); }
+    .photos img {
+      display: block;
+      width: 100%;
+      height: 110px;
+      object-fit: cover;
+      background: var(--panel-2);
+    }
+
+    /* Mini-mapa */
+    .map-wrap {
+      align-self: flex-start;
+      width: 100%;
+      max-width: 85%;
+      border-radius: 8px;
+      overflow: hidden;
+      border: 1px solid var(--border);
+    }
+    .map {
+      height: 280px;
+      background: var(--panel-2);
+    }
+    /* Tema oscuro para Leaflet */
+    .leaflet-tile-pane { filter: brightness(0.85) saturate(0.9); }
     .typing {
       align-self: flex-start;
       color: var(--muted);
@@ -214,72 +366,239 @@
     Asistente con Claude
   </footer>
 
+  <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.0/dist/purify.min.js"></script>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+          integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+          crossorigin=""></script>
   <script>
     const chat = document.getElementById('chat');
     const form = document.getElementById('form');
     const input = document.getElementById('input');
     const send = document.getElementById('send');
-    const messages = []; // [{role, content}]
+    const messages = []; // historial enviado al backend
 
-    function addMessage(role, content) {
+    marked.setOptions({ gfm: true, breaks: true });
+
+    function renderMarkdown(text) {
+      const html = marked.parse(text || '');
+      return DOMPurify.sanitize(html, {
+        ALLOWED_ATTR: ['href', 'title', 'target', 'rel', 'colspan', 'rowspan', 'align'],
+      });
+    }
+
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, c => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+      }[c]));
+    }
+
+    function addUserMessage(content) {
       const div = document.createElement('div');
-      div.className = `msg ${role}`;
+      div.className = 'msg user';
       div.textContent = content;
       chat.appendChild(div);
       chat.scrollTop = chat.scrollHeight;
-      return div;
     }
 
-    function addToolEvents(events) {
-      if (!events || events.length === 0) return;
+    function addSystemMessage(content) {
       const div = document.createElement('div');
-      div.className = 'tools';
-      div.innerHTML = events.map(e => {
-        const args = JSON.stringify(e.input);
-        return `🔧 <b>${e.name}</b>(${args})`;
-      }).join('<br>');
+      div.className = 'msg system';
+      div.textContent = content;
       chat.appendChild(div);
       chat.scrollTop = chat.scrollHeight;
     }
 
-    function addTyping() {
-      const div = document.createElement('div');
-      div.className = 'typing';
-      div.textContent = 'Pensando';
-      chat.appendChild(div);
+    function addPhotos(urls) {
+      const wrap = document.createElement('div');
+      wrap.className = 'photos';
+      for (const url of urls) {
+        const a = document.createElement('a');
+        a.href = url.replace(/w=\d+/, 'w=1600');
+        a.target = '_blank';
+        a.rel = 'noopener noreferrer';
+        const img = document.createElement('img');
+        img.src = url;
+        img.loading = 'lazy';
+        img.alt = 'Foto de la parcela';
+        a.appendChild(img);
+        wrap.appendChild(a);
+      }
+      chat.appendChild(wrap);
       chat.scrollTop = chat.scrollHeight;
-      return div;
+    }
+
+    function addMap(geojson) {
+      const wrap = document.createElement('div');
+      wrap.className = 'map-wrap';
+      const inner = document.createElement('div');
+      inner.className = 'map';
+      wrap.appendChild(inner);
+      chat.appendChild(wrap);
+      chat.scrollTop = chat.scrollHeight;
+
+      // Leaflet necesita que el div esté en el DOM antes de inicializar.
+      requestAnimationFrame(() => {
+        try {
+          const map = L.map(inner, {
+            attributionControl: false,
+            scrollWheelZoom: false,
+          });
+          L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            maxZoom: 19,
+          }).addTo(map);
+          const layer = L.geoJSON(geojson, {
+            style: {
+              color: '#5b8def',
+              weight: 2,
+              fillColor: '#5b8def',
+              fillOpacity: 0.25,
+            },
+          }).addTo(map);
+          const bounds = layer.getBounds();
+          if (bounds.isValid()) {
+            map.fitBounds(bounds, { padding: [20, 20], maxZoom: 19 });
+          } else {
+            map.setView([-34.6037, -58.3816], 13);
+          }
+        } catch (e) {
+          inner.textContent = 'No se pudo renderizar el mapa: ' + e.message;
+        }
+      });
+    }
+
+    // Renderizador de stream con state machine simple.
+    class StreamRenderer {
+      constructor() {
+        this.bubble = null;          // div del mensaje en construcción
+        this.bubbleText = '';        // markdown acumulado del bubble actual
+        this.fullText = '';          // texto completo (para el historial)
+        this.toolsBox = null;        // contenedor de tools en curso
+        this.activeToolLines = {};   // name → div line en curso
+      }
+
+      _newBubble() {
+        this.bubble = document.createElement('div');
+        this.bubble.className = 'msg assistant';
+        this.bubbleText = '';
+        chat.appendChild(this.bubble);
+      }
+
+      _ensureToolsBox() {
+        if (!this.toolsBox) {
+          this.toolsBox = document.createElement('div');
+          this.toolsBox.className = 'tools';
+          chat.appendChild(this.toolsBox);
+        }
+        return this.toolsBox;
+      }
+
+      handle(evt) {
+        switch (evt.type) {
+          case 'tool_call': {
+            // empieza una nueva tool: corta el bubble actual
+            this.bubble = null;
+            const box = this._ensureToolsBox();
+            const line = document.createElement('div');
+            line.className = 'tool-line';
+            const args = JSON.stringify(evt.input);
+            line.innerHTML = `<span class="spinner"></span> 🔧 <b>${escapeHtml(evt.name)}</b>(${escapeHtml(args)})`;
+            box.appendChild(line);
+            this.activeToolLines[evt.name] = line;
+            break;
+          }
+          case 'tool_result': {
+            const line = this.activeToolLines[evt.name];
+            if (line) {
+              line.classList.add('done');
+              delete this.activeToolLines[evt.name];
+            }
+            break;
+          }
+          case 'photos':
+            this.bubble = null;
+            this.toolsBox = null;
+            addPhotos(evt.urls);
+            break;
+          case 'geometry':
+            this.bubble = null;
+            this.toolsBox = null;
+            addMap(evt.geojson);
+            break;
+          case 'text': {
+            // texto entrante: si no hay bubble activo, abro uno nuevo
+            if (!this.bubble) {
+              this.toolsBox = null;
+              this._newBubble();
+            }
+            this.bubbleText += evt.delta;
+            this.fullText += evt.delta;
+            this.bubble.innerHTML = renderMarkdown(this.bubbleText);
+            this.bubble.querySelectorAll('a').forEach(a => {
+              a.setAttribute('target', '_blank');
+              a.setAttribute('rel', 'noopener noreferrer');
+            });
+            break;
+          }
+          case 'error':
+            addSystemMessage('Error: ' + evt.message);
+            break;
+          case 'done':
+            break;
+        }
+        chat.scrollTop = chat.scrollHeight;
+      }
     }
 
     async function sendMessage(text) {
-      addMessage('user', text);
+      addUserMessage(text);
       messages.push({ role: 'user', content: text });
 
       send.disabled = true;
       input.disabled = true;
-      const typing = addTyping();
+
+      const renderer = new StreamRenderer();
 
       try {
-        const res = await fetch('/chat', {
+        const res = await fetch('/chat/stream', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ messages }),
         });
-        typing.remove();
 
         if (!res.ok) {
           const err = await res.text();
-          addMessage('system', `Error ${res.status}: ${err}`);
+          addSystemMessage(`Error ${res.status}: ${err}`);
           return;
         }
 
-        const data = await res.json();
-        addToolEvents(data.tool_events);
-        addMessage('assistant', data.reply);
-        messages.push({ role: 'assistant', content: data.reply });
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          let nl;
+          while ((nl = buffer.indexOf('\n')) !== -1) {
+            const line = buffer.slice(0, nl).trim();
+            buffer = buffer.slice(nl + 1);
+            if (!line) continue;
+            try {
+              const evt = JSON.parse(line);
+              renderer.handle(evt);
+            } catch (e) {
+              console.error('Bad NDJSON line:', line);
+            }
+          }
+        }
+
+        if (renderer.fullText) {
+          messages.push({ role: 'assistant', content: renderer.fullText });
+        }
       } catch (e) {
-        typing.remove();
-        addMessage('system', `Error de red: ${e.message}`);
+        addSystemMessage('Error de red: ' + e.message);
       } finally {
         send.disabled = false;
         input.disabled = false;

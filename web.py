@@ -16,15 +16,17 @@ Variables de entorno:
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import time
 from collections import defaultdict, deque
 from pathlib import Path
+from typing import AsyncIterator
 
 from anthropic import AsyncAnthropic
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -51,8 +53,15 @@ Código Urbanístico). Flujo típico:
    plusvalía, patrimonio, etc.) o `get_informe_completo` si querés todo de una.
 
 Respondé en español, con tono profesional pero claro. Cuando uses datos de las \
-tools, citá el SMP y los valores concretos. Si una tool devuelve un error, \
-informalo y sugerí qué intentar (ej: verificar la dirección)."""
+tools, citá el SMP y los valores concretos. Usá tablas markdown para datos \
+tabulares (FOT, alturas, plusvalía). Si una tool devuelve un error, informalo y \
+sugerí qué intentar (ej: verificar la dirección).
+
+Cuando consultes una parcela específica y el usuario no haya pedido lo contrario, \
+llamá también `get_fotos_parcela` y `get_geometria_parcela` — el frontend las \
+renderiza como galería de fotos y mini-mapa interactivo, lo cual hace la \
+respuesta mucho más útil. No es necesario describir las fotos ni el mapa en el \
+texto, solo llamar las tools."""
 
 API_KEY = os.getenv("ANTHROPIC_API_KEY")
 if not API_KEY:
@@ -187,6 +196,99 @@ async def _run_loop(messages: list[dict], tool_events: list[ToolEvent]) -> ChatR
     raise HTTPException(
         500,
         f"Se llegó al límite de {MAX_TURNS} turnos sin respuesta final.",
+    )
+
+
+# ── Streaming endpoint ────────────────────────────────────────────────────────
+
+def _ndjson(obj: dict) -> str:
+    return json.dumps(obj, ensure_ascii=False) + "\n"
+
+
+def _is_geojson(result) -> bool:
+    if not isinstance(result, dict) or "error" in result or not result:
+        return False
+    return any(k in result for k in ("type", "features", "geometry", "coordinates"))
+
+
+@app.post("/chat/stream")
+async def chat_stream(req: ChatRequest, request: Request):
+    if client is None:
+        raise HTTPException(500, "ANTHROPIC_API_KEY no configurada en el servidor.")
+    ip = request.client.host if request.client else "unknown"
+    if not _rate_limit(ip):
+        raise HTTPException(429, "Demasiadas consultas, esperá un minuto.")
+
+    messages: list[dict] = [
+        {"role": m.role, "content": m.content} for m in req.messages
+    ]
+
+    async def event_stream() -> AsyncIterator[str]:
+        tools_schema = anthropic_tools()
+        try:
+            for _ in range(MAX_TURNS):
+                async with client.messages.stream(
+                    model=ANTHROPIC_MODEL,
+                    max_tokens=MAX_TOKENS,
+                    system=SYSTEM_PROMPT,
+                    tools=tools_schema,
+                    messages=messages,
+                ) as stream:
+                    async for text in stream.text_stream:
+                        if text:
+                            yield _ndjson({"type": "text", "delta": text})
+                    final = await stream.get_final_message()
+
+                messages.append({"role": "assistant", "content": final.content})
+
+                if final.stop_reason != "tool_use":
+                    yield _ndjson({"type": "done"})
+                    return
+
+                tool_use_blocks = [
+                    b for b in final.content if getattr(b, "type", None) == "tool_use"
+                ]
+                tool_results_for_api = []
+                for block in tool_use_blocks:
+                    yield _ndjson(
+                        {"type": "tool_call", "name": block.name, "input": block.input}
+                    )
+                    result = await asyncio.to_thread(run_tool, block.name, block.input)
+
+                    # Eventos especiales según la tool
+                    if block.name == "get_fotos_parcela" and isinstance(result, dict):
+                        urls = result.get("urls") or []
+                        if urls:
+                            yield _ndjson({"type": "photos", "urls": urls})
+                    elif block.name == "get_geometria_parcela" and _is_geojson(result):
+                        yield _ndjson({"type": "geometry", "geojson": result})
+
+                    yield _ndjson(
+                        {"type": "tool_result", "name": block.name, "preview": str(result)[:300]}
+                    )
+                    tool_results_for_api.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": block.id,
+                            "content": str(result)[:60_000],
+                        }
+                    )
+
+                messages.append({"role": "user", "content": tool_results_for_api})
+
+            yield _ndjson(
+                {"type": "error", "message": f"Se llegó al límite de {MAX_TURNS} turnos."}
+            )
+        except Exception as e:
+            yield _ndjson({"type": "error", "message": str(e)})
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="application/x-ndjson",
+        headers={
+            "X-Accel-Buffering": "no",  # nginx/Railway: no buffer
+            "Cache-Control": "no-cache",
+        },
     )
 
 
