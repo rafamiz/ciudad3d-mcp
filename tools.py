@@ -16,7 +16,7 @@ WS_USIG = "https://ws.usig.buenosaires.gob.ar"
 FOTOS_USIG = "https://fotos.usig.buenosaires.gob.ar"
 SERV_USIG = "https://servicios.usig.buenosaires.gob.ar"
 
-DEFAULT_TIMEOUT = 15.0
+DEFAULT_TIMEOUT = 10.0
 
 
 def _get(url: str, params: dict | None = None) -> dict | list:

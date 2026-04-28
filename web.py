@@ -32,8 +32,9 @@ from tools import anthropic_tools, run_tool
 
 # ── Config ────────────────────────────────────────────────────────────────────
 ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6")
-MAX_TURNS = int(os.getenv("MAX_TURNS", "10"))
-MAX_TOKENS = int(os.getenv("MAX_TOKENS", "4096"))
+MAX_TURNS = int(os.getenv("MAX_TURNS", "6"))
+MAX_TOKENS = int(os.getenv("MAX_TOKENS", "2048"))
+REQUEST_TIMEOUT_S = int(os.getenv("REQUEST_TIMEOUT_S", "75"))
 ALLOWED_ORIGINS = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "*").split(",")]
 
 SYSTEM_PROMPT = """Sos un asistente experto en datos urbanísticos, catastrales y de \
@@ -123,15 +124,29 @@ async def chat(req: ChatRequest, request: Request):
     if not _rate_limit(ip):
         raise HTTPException(429, "Demasiadas consultas, esperá un minuto.")
 
-    # Convertimos el historial a formato Anthropic.
     messages: list[dict] = [
         {"role": m.role, "content": m.content} for m in req.messages
     ]
-
     tool_events: list[ToolEvent] = []
-    tools_schema = anthropic_tools()
 
-    # Loop agéntico: mientras Claude pida tools, las ejecutamos y volvemos.
+    try:
+        return await asyncio.wait_for(
+            _run_loop(messages, tool_events),
+            timeout=REQUEST_TIMEOUT_S,
+        )
+    except asyncio.TimeoutError:
+        called = ", ".join(e.name for e in tool_events) or "(ninguna)"
+        raise HTTPException(
+            504,
+            f"La consulta tardó más de {REQUEST_TIMEOUT_S}s. Tools llamadas: {called}. "
+            "Probá con una pregunta más específica (ej: pasá directamente el SMP).",
+        )
+    except Exception as e:
+        raise HTTPException(500, f"Error procesando la consulta: {e}")
+
+
+async def _run_loop(messages: list[dict], tool_events: list[ToolEvent]) -> ChatResponse:
+    tools_schema = anthropic_tools()
     for _ in range(MAX_TURNS):
         resp = await client.messages.create(
             model=ANTHROPIC_MODEL,
