@@ -43,14 +43,23 @@ $repoName = "ciudad3d-mcp"
 
 if ($ghAvailable) {
     Write-Host "GitHub CLI detectado." -ForegroundColor Green
-    $authStatus = gh auth status 2>&1
-    if ($LASTEXITCODE -ne 0) {
+    $prevPref = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    gh auth status *> $null
+    $authed = ($LASTEXITCODE -eq 0)
+    $ErrorActionPreference = $prevPref
+    if (-not $authed) {
         Write-Host "Necesitás loguearte primero. Corro 'gh auth login'..." -ForegroundColor Yellow
         gh auth login
     }
 
-    $existing = gh repo view $repoName 2>&1
-    if ($LASTEXITCODE -eq 0) {
+    $prevPref = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    gh repo view $repoName *> $null
+    $repoExists = ($LASTEXITCODE -eq 0)
+    $ErrorActionPreference = $prevPref
+
+    if ($repoExists) {
         Write-Host "El repo ya existe en GitHub. Pusheo los cambios..." -ForegroundColor Yellow
         if (-not (git remote | Select-String -Pattern "^origin$" -Quiet)) {
             $url = (gh repo view $repoName --json url -q .url) + ".git"
