@@ -15,24 +15,54 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import os
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 
 import database as db
 import scraper
 
 logger = logging.getLogger("ciudad3d.scheduler")
 
+LAST_RUN_PATH = Path(__file__).resolve().parent / "last_run.json"
+
 
 async def run_job(max_pages: int) -> dict:
     started_at = datetime.now(timezone.utc)
+    started_at_local = datetime.now().replace(microsecond=0)
     logger.info("Scrape iniciado a las %s (max_pages=%d)", started_at.isoformat(), max_pages)
 
     await db.init_db()
     listings = await scraper.scrape(max_pages=max_pages)
     stats = await db.upsert_terrenos(listings)
+
+    new_rows = await db.get_new_terrenos()
+    new_listings = [
+        {
+            "id": row["id"],
+            "price": row.get("price"),
+            "currency": row.get("currency"),
+            "surface_total": row.get("surface_total"),
+            "address": row.get("address"),
+            "url": row.get("url"),
+        }
+        for row in new_rows
+    ]
+
+    last_run_payload = {
+        "ran_at": started_at_local.isoformat(),
+        "new_count": stats["new"],
+        "total_count": stats["total"],
+        "new_listings": new_listings,
+    }
+    LAST_RUN_PATH.write_text(
+        json.dumps(last_run_payload, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    logger.info("last_run.json escrito en %s", LAST_RUN_PATH)
 
     finished_at = datetime.now(timezone.utc)
     duration = (finished_at - started_at).total_seconds()
