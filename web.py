@@ -20,17 +20,19 @@ import json
 import os
 import time
 from collections import defaultdict, deque
+from datetime import datetime
 from pathlib import Path
 from typing import AsyncIterator
 
 from anthropic import AsyncAnthropic
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 import database as db
+import scraper
 from tools import anthropic_tools, run_tool
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -224,6 +226,107 @@ async def _run_loop(messages: list[dict], tool_events: list[ToolEvent]) -> ChatR
         500,
         f"Se llegó al límite de {MAX_TURNS} turnos sin respuesta final.",
     )
+
+
+# ── Scrape endpoints ──────────────────────────────────────────────────────────
+LAST_RUN_PATH = Path(__file__).resolve().parent / "last_run.json"
+
+# Estado simple en memoria para evitar scrapes concurrentes en el mismo proceso.
+_scrape_state: dict[str, object] = {"running": False, "last_error": None}
+
+
+async def _run_scrape_job(max_pages: int) -> None:
+    """
+    Idéntico al run_job de scraper_scheduler salvo que NO cierra el pool de
+    asyncpg al terminar — éste corre dentro del proceso del web server, que
+    comparte ese pool con todos los otros endpoints.
+    """
+    if _scrape_state["running"]:
+        return
+    _scrape_state["running"] = True
+    _scrape_state["last_error"] = None
+    started_at_local = datetime.now().replace(microsecond=0)
+    try:
+        listings = await scraper.scrape(max_pages=max_pages)
+        stats = await db.upsert_terrenos(listings)
+        new_rows = await db.get_new_terrenos()
+        new_listings = [
+            {
+                "id": row["id"],
+                "price": row.get("price"),
+                "currency": row.get("currency"),
+                "surface_total": row.get("surface_total"),
+                "address": row.get("address"),
+                "url": row.get("url"),
+            }
+            for row in new_rows
+        ]
+        LAST_RUN_PATH.write_text(
+            json.dumps(
+                {
+                    "ran_at": started_at_local.isoformat(),
+                    "new_count": stats["new"],
+                    "total_count": stats["total"],
+                    "new_listings": new_listings,
+                },
+                indent=2,
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+    except Exception as e:
+        _scrape_state["last_error"] = f"{type(e).__name__}: {e}"
+        print(f"[/api/scrape] error: {e}")
+    finally:
+        _scrape_state["running"] = False
+
+
+@app.post("/api/scrape")
+async def api_scrape(background_tasks: BackgroundTasks, max_pages: int = 20):
+    if _scrape_state["running"]:
+        total = await db.count_terrenos()
+        return {
+            "ok": False,
+            "new_count": 0,
+            "total_count": total,
+            "message": "Ya hay un scrape en curso. Consultá /api/scrape/status.",
+        }
+
+    total = await db.count_terrenos()
+    background_tasks.add_task(_run_scrape_job, max_pages)
+    return {
+        "ok": True,
+        "new_count": 0,
+        "total_count": total,
+        "message": (
+            f"Scrape iniciado en background (max_pages={max_pages}). "
+            "Consultá /api/scrape/status para ver el progreso."
+        ),
+    }
+
+
+@app.get("/api/scrape/status")
+async def api_scrape_status():
+    total = await db.count_terrenos()
+    last_run: dict | None = None
+    if LAST_RUN_PATH.exists():
+        try:
+            data = json.loads(LAST_RUN_PATH.read_text(encoding="utf-8"))
+            last_run = {
+                "ran_at": data.get("ran_at"),
+                "new_count": data.get("new_count"),
+                "total_count": data.get("total_count"),
+            }
+        except (json.JSONDecodeError, OSError):
+            last_run = None
+
+    return {
+        "ok": True,
+        "running": _scrape_state["running"],
+        "last_error": _scrape_state["last_error"],
+        "total_count": total,
+        "last_run": last_run,
+    }
 
 
 # ── Streaming endpoint ────────────────────────────────────────────────────────
