@@ -16,6 +16,7 @@ import os
 from mcp.server.fastmcp import FastMCP
 
 import database as db
+import report_generator
 import scraper
 import tools as t
 
@@ -298,6 +299,59 @@ def terrenos_con_bajas(dias: int = 7) -> dict:
         return {"dias": dias, "count": len(items), "results": items}
 
     return _run_async(_run())
+
+
+@mcp.tool()
+def generar_informe(terreno_id: str) -> dict:
+    """
+    Genera un informe PDF profesional para un terreno cacheado, cruzando los
+    datos de ZonaProp con normativa GCBA (parcela, edificabilidad, afectaciones,
+    patrimonio, usos) e historial de precios. El PDF se guarda en `reports/`
+    dentro del repo.
+
+    Args:
+        terreno_id: postingId del listing en ZonaProp.
+    """
+    async def _fetch():
+        await db.init_db()
+        listing = await db.get_terreno_by_id(terreno_id)
+        historial = await db.get_historial_precio(terreno_id)
+        return listing, historial
+
+    listing, historial = _run_async(_fetch())
+    if not listing:
+        return {"error": f"terreno {terreno_id} no encontrado en cache"}
+
+    gcba: dict = {}
+    lat = listing.get("lat")
+    lng = listing.get("lng")
+    if lat is not None and lng is not None:
+        parcela = t.get_parcela_por_coordenadas(lng=lng, lat=lat)
+        gcba["parcela"] = parcela
+        gcba["contexto"] = t.get_datos_contextuales(lng=lng, lat=lat)
+        smp = None
+        if isinstance(parcela, dict):
+            smp = parcela.get("smp") or parcela.get("SMP")
+        if smp:
+            gcba["smp"] = smp
+            gcba["edificabilidad"] = t.get_edificabilidad(smp)
+            gcba["afectaciones"] = t.get_afectaciones(smp)
+            gcba["plusvalia"] = t.get_plusvalia(smp)
+            gcba["usos"] = t.get_usos_del_suelo(smp)
+            gcba["patrimonio"] = t.get_patrimonio(smp)
+
+    pdf_path = report_generator.generate_report({
+        "listing": listing,
+        "gcba": gcba,
+        "historial": historial,
+    })
+
+    return {
+        "ok": True,
+        "terreno_id": terreno_id,
+        "pdf_path": pdf_path,
+        "message": f"Informe generado y guardado en: {pdf_path}",
+    }
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

@@ -6,3 +6,4 @@ pydantic>=2.9.0
 mcp[cli]>=1.27.0
 aiosqlite>=0.20.0
 curl_cffi>=0.7.0
+reportlab>=4.0.0
