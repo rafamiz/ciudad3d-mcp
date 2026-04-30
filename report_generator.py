@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import io
 import json
+import math
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -698,8 +699,159 @@ def _build_section_potencial(listing: dict, gcba: dict, styles: dict) -> list:
     return elements
 
 
+def _extract_usos_text(usos: Any) -> list[str]:
+    """Aplana usos a una lista de strings minúsculas para matchear keywords."""
+    if not isinstance(usos, dict) or _is_error_payload(usos):
+        return []
+    texts: list[str] = []
+    for key in ("nivel1", "nivel2", "nivel3", "categorias", "rubros"):
+        val = usos.get(key)
+        if isinstance(val, list):
+            for item in val:
+                if isinstance(item, str):
+                    texts.append(item.lower())
+                elif isinstance(item, dict):
+                    for k in ("nombre", "descripcion", "rubro", "uso"):
+                        v = item.get(k)
+                        if isinstance(v, str):
+                            texts.append(v.lower())
+    return texts
+
+
+def _is_planta_baja_comercial(usos: Any, distrito: str | None) -> bool:
+    """Heurística: ¿permite local comercial en planta baja según los usos?"""
+    keywords = ("local", "comercio", "comercial", "planta baja", "oficina")
+    for t in _extract_usos_text(usos):
+        for kw in keywords:
+            if kw in t:
+                return True
+    return False
+
+
+def _build_section_escenarios(listing: dict, gcba: dict, styles: dict) -> list:
+    edif = gcba.get("edificabilidad") or {}
+    parcela = gcba.get("parcela") or {}
+    usos = gcba.get("usos") or {}
+
+    surface = listing.get("surface_total")
+    sup_parcela_cur = _safe_get(edif, "superficie_parcela") if isinstance(edif, dict) else None
+    surface_for_calc = surface if surface is not None else sup_parcela_cur
+    try:
+        surface_f = float(surface_for_calc) if surface_for_calc is not None else None
+    except (TypeError, ValueError):
+        surface_f = None
+
+    fot_raw = _safe_get(edif, "fot") if isinstance(edif, dict) else None
+    fot_f = _extract_fot_value(fot_raw)
+
+    altura_raw = (
+        _safe_get(edif, "altura_max")
+        or _safe_get(edif, "altura_maxima")
+        or _safe_get(edif, "alturaMaxima")
+    ) if isinstance(edif, dict) else None
+    altura_val = _extract_altura_value(altura_raw)
+
+    distrito = _extract_distrito(
+        edif if isinstance(edif, dict) else {},
+        parcela if isinstance(parcela, dict) else {},
+    )
+
+    elements: list = [Paragraph("5. Escenarios de desarrollo sugeridos", styles["h2"])]
+
+    if not surface_f or not fot_f or surface_f <= 0 or fot_f <= 0:
+        elements.append(Paragraph(
+            "<i>Datos insuficientes para calcular escenarios "
+            "(se requiere superficie del lote y FOT).</i>",
+            styles["small"],
+        ))
+        return elements
+
+    m2_totales = surface_f * fot_f
+    if altura_val and altura_val > 0:
+        pisos = max(1, math.ceil(altura_val / 3.0))
+    else:
+        # Estimación si no hay altura: FOT / FOS típico 0.6
+        pisos = max(1, math.ceil(fot_f / 0.6))
+
+    pb_comercial = _is_planta_baja_comercial(usos, distrito)
+
+    # Si la PB se destina a local comercial y hay más de un piso, separamos
+    # la superficie de la PB del cómputo de viviendas.
+    if pb_comercial and pisos > 1:
+        m2_pb = m2_totales / pisos
+        m2_para_viviendas = (m2_totales - m2_pb) * 0.80
+        pisos_viv = pisos - 1
+    else:
+        m2_para_viviendas = m2_totales * 0.80
+        pisos_viv = pisos
+
+    units_a = max(0, int(m2_para_viviendas // 35))
+    units_b = max(0, int(m2_para_viviendas // 55))
+    units_c = max(0, int(m2_para_viviendas // 75))
+
+    pb_note = " · planta baja apta para local comercial" if pb_comercial and pisos > 1 else ""
+
+    scenarios = [
+        (
+            "A",
+            "Monoambientes (1 ambiente)",
+            f"<b>{units_a}</b> monoambientes de 35 m² en {pisos_viv} piso(s){pb_note}",
+            "Mayor cantidad de unidades, ticket más bajo, alta rotación.",
+        ),
+        (
+            "B",
+            "Departamentos de 2 ambientes",
+            f"<b>{units_b}</b> departamentos de 2 ambientes (55 m²) en {pisos_viv} piso(s){pb_note}",
+            "Producto balanceado, demanda sostenida del mercado.",
+        ),
+        (
+            "C",
+            "Departamentos de 3 ambientes (premium)",
+            f"<b>{units_c}</b> departamentos de 3 ambientes (75 m²) en {pisos_viv} piso(s){pb_note}",
+            "Producto más espacioso, menor cantidad de unidades pero ticket mayor.",
+        ),
+    ]
+
+    badge_style = ParagraphStyle(
+        "badge", fontName="Helvetica-Bold", fontSize=22, leading=24,
+        textColor=colors.white, alignment=TA_CENTER,
+    )
+
+    for letter, title, line1, line2 in scenarios:
+        badge = Paragraph(letter, badge_style)
+        content = [
+            Paragraph(f"<b>{title}</b>", styles["value"]),
+            Spacer(1, 2),
+            Paragraph(line1, styles["body"]),
+            Paragraph(f"<i>{line2}</i>", styles["small"]),
+        ]
+        t = Table([[badge, content]], colWidths=[1.6 * cm, 14.4 * cm])
+        t.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (0, 0), COLOR_ACCENT),
+            ("BACKGROUND", (1, 0), (1, 0), COLOR_LIGHT),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("ALIGN", (0, 0), (0, 0), "CENTER"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 8),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+            ("TOPPADDING", (0, 0), (-1, -1), 10),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 10),
+            ("BOX", (0, 0), (-1, -1), 0.4, COLOR_BORDER),
+        ]))
+        elements.append(t)
+        elements.append(Spacer(1, 5))
+
+    elements.append(Spacer(1, 4))
+    elements.append(Paragraph(
+        "<i>Estimaciones indicativas. Sujeto a proyecto arquitectónico "
+        "definitivo y normativa vigente. Se aplicó un descuento del 20 % sobre "
+        "los m² totales por circulación y estructura.</i>",
+        styles["small"],
+    ))
+    return elements
+
+
 def _build_section_historial(historial: list[dict], listing: dict, styles: dict) -> list:
-    elements: list = [Paragraph("5. Historial de precio", styles["h2"])]
+    elements: list = [Paragraph("6. Historial de precio", styles["h2"])]
 
     if not historial:
         precio_actual = _fmt_money(listing.get("price"), listing.get("currency"))
@@ -822,6 +974,7 @@ def generate_report(
     story += _build_section_normativa(gcba, styles)
     story += _build_section_restricciones(gcba, styles)
     story += _build_section_potencial(listing, gcba, styles)
+    story += _build_section_escenarios(listing, gcba, styles)
     story += _build_section_historial(historial, listing, styles)
 
     doc.build(story, onFirstPage=_on_page, onLaterPages=_on_page)
