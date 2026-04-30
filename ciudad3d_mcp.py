@@ -10,13 +10,25 @@ remoto en Railway/Render, exportá MCP_TRANSPORT=streamable-http (ver README).
 
 from __future__ import annotations
 
+import asyncio
 import os
 
 from mcp.server.fastmcp import FastMCP
 
+import database as db
+import scraper
 import tools as t
 
 mcp = FastMCP("Ciudad 3D CABA")
+
+
+def _run_async(coro):
+    """Ejecuta una corrutina desde contexto sync; abre nuevo loop si hace falta."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+    return loop.run_until_complete(coro)
 
 
 # ── Tools registradas ─────────────────────────────────────────────────────────
@@ -145,6 +157,107 @@ def get_geometria_parcela(smp: str) -> dict:
 def get_informe_completo(smp: str) -> dict:
     """Informe completo combinando todas las consultas (due diligence)."""
     return t.get_informe_completo(smp)
+
+
+# ── ZonaProp terrenos (scraper + SQLite) ─────────────────────────────────────
+
+@mcp.tool()
+def buscar_terrenos(
+    zona: str | None = None,
+    precio_max: float | None = None,
+    superficie_min: float | None = None,
+) -> dict:
+    """
+    Busca terrenos en venta (CABA) cacheados en SQLite, filtrando opcionalmente
+    por zona (substring contra dirección/título), precio máximo y superficie
+    mínima.
+
+    Args:
+        zona: Substring para matchear barrio o dirección (ej: "Palermo").
+        precio_max: Precio máximo en la moneda nominal del listing.
+        superficie_min: Superficie total mínima en m².
+    """
+    filters = {
+        "zona": zona,
+        "precio_max": precio_max,
+        "superficie_min": superficie_min,
+    }
+    filters = {k: v for k, v in filters.items() if v is not None}
+
+    async def _run():
+        await db.init_db()
+        items = await db.get_terrenos(filters=filters, limit=100)
+        total = await db.count_terrenos()
+        return {"count": len(items), "total_en_db": total, "results": items}
+
+    return _run_async(_run())
+
+
+@mcp.tool()
+def terreno_detalle(url_or_id: str) -> dict:
+    """
+    Devuelve un terreno cacheado y lo cruza con datos urbanísticos de GCBA
+    (parcela, edificabilidad, afectaciones, plusvalía, datos contextuales)
+    usando lat/lng del listing.
+
+    Args:
+        url_or_id: URL completa de ZonaProp o el postingId.
+    """
+    async def _fetch():
+        await db.init_db()
+        if url_or_id.startswith("http"):
+            return await db.get_terreno_by_url(url_or_id)
+        return await db.get_terreno_by_id(url_or_id)
+
+    listing = _run_async(_fetch())
+    if not listing:
+        return {"error": "terreno no encontrado en cache. Probá actualizar_terrenos() primero."}
+
+    out: dict = {"listing": listing, "gcba": {}}
+    lat = listing.get("lat")
+    lng = listing.get("lng")
+    if lat is None or lng is None:
+        out["gcba"]["error"] = "el listing no tiene coordenadas"
+        return out
+
+    parcela = t.get_parcela_por_coordenadas(lng=lng, lat=lat)
+    out["gcba"]["parcela"] = parcela
+    out["gcba"]["contexto"] = t.get_datos_contextuales(lng=lng, lat=lat)
+
+    smp = None
+    if isinstance(parcela, dict):
+        smp = parcela.get("smp") or parcela.get("SMP")
+    if smp:
+        out["gcba"]["smp"] = smp
+        out["gcba"]["edificabilidad"] = t.get_edificabilidad(smp)
+        out["gcba"]["afectaciones"] = t.get_afectaciones(smp)
+        out["gcba"]["plusvalia"] = t.get_plusvalia(smp)
+        out["gcba"]["usos"] = t.get_usos_del_suelo(smp)
+
+    return out
+
+
+@mcp.tool()
+def actualizar_terrenos(max_pages: int = 20) -> dict:
+    """
+    Lanza un scrape fresco de ZonaProp (terrenos venta CABA), actualiza SQLite
+    y devuelve un resumen con cuántos listings nuevos se encontraron.
+
+    Args:
+        max_pages: Máximo de páginas a scrapear (default 20).
+    """
+    async def _run():
+        await db.init_db()
+        listings = await scraper.scrape(max_pages=max_pages)
+        stats = await db.upsert_terrenos(listings)
+        return {
+            "scraped": len(listings),
+            "nuevos": stats["new"],
+            "actualizados": stats["updated"],
+            "total_en_db": stats["total"],
+        }
+
+    return _run_async(_run())
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
