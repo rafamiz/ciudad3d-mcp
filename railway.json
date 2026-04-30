@@ -9,5 +9,12 @@
     "restartPolicyMaxRetries": 3,
     "healthcheckPath": "/health",
     "healthcheckTimeout": 30
-  }
+  },
+  "cron": [
+    {
+      "name": "scraper-zonaprop",
+      "command": "python scraper_scheduler.py --max-pages 20",
+      "schedule": "0 12,14,16,18,20 * * *"
+    }
+  ]
 }
