@@ -108,6 +108,10 @@ def _rate_limit(ip: str) -> bool:
 # ── App ───────────────────────────────────────────────────────────────────────
 app = FastAPI(title="Ciudad 3D Chat", version="0.1.0")
 
+REPORTS_DIR = Path(__file__).resolve().parent / "reports"
+REPORTS_DIR.mkdir(exist_ok=True)
+app.mount("/reports", StaticFiles(directory=REPORTS_DIR), name="reports")
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,

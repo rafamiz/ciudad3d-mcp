@@ -9,6 +9,7 @@ el backend del chat web (web.py) importan desde acá.
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 import httpx
 
@@ -269,11 +270,13 @@ def generar_informe(terreno_id: str) -> dict:
         "historial": historial,
     })
 
+    pdf_url = f"/reports/{Path(pdf_path).name}"
+
     return {
         "ok": True,
         "terreno_id": terreno_id,
-        "pdf_path": pdf_path,
-        "message": f"Informe generado y guardado en: {pdf_path}",
+        "pdf_url": pdf_url,
+        "message": f"Informe generado. Descargalo en: {pdf_url}",
     }
 
 
@@ -580,8 +583,10 @@ TOOL_REGISTRY: dict[str, dict] = {
         "description": (
             "Genera un informe PDF profesional para un terreno cacheado, cruzando los "
             "datos de ZonaProp con normativa GCBA (parcela, edificabilidad, "
-            "afectaciones, patrimonio, usos) e historial de precios. Devuelve la ruta "
-            "del PDF generado en el servidor."
+            "afectaciones, patrimonio, usos) e historial de precios. Devuelve "
+            "`pdf_url` (ruta relativa tipo `/reports/informe_<id>_<fecha>.pdf`) que "
+            "el usuario puede descargar directamente desde el navegador. "
+            "Presentalo siempre como un link markdown clickeable."
         ),
         "input_schema": {
             "type": "object",
