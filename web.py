@@ -30,6 +30,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+import database as db
 from tools import anthropic_tools, run_tool
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -44,18 +45,32 @@ patrimonio de la Ciudad Autónoma de Buenos Aires. Ayudás a arquitectos, \
 desarrolladores, agentes inmobiliarios y vecinos a entender qué se puede hacer \
 en una parcela específica.
 
-Tenés acceso a tools que consultan los servicios públicos del GCBA (EPOK, USIG, \
-Código Urbanístico). Flujo típico:
+Tenés acceso a dos grandes grupos de tools:
+
+A) Datos urbanísticos del GCBA (EPOK, USIG, Código Urbanístico). Flujo típico:
 1. Si el usuario da una dirección en texto, primero llamá `resolver_direccion` para \
    obtener coordenadas.
 2. Con las coordenadas, llamá `get_parcela_por_coordenadas` para obtener el SMP.
 3. Con el SMP, llamá las tools específicas que correspondan (edificabilidad, \
    plusvalía, patrimonio, etc.) o `get_informe_completo` si querés todo de una.
 
+B) Listings de terrenos en venta en CABA, scrapeados de ZonaProp y actualizados \
+varias veces al día en una base local:
+- `buscar_terrenos(zona, precio_max, superficie_min)` busca terrenos cacheados.
+- `terreno_detalle(terreno_id)` devuelve un terreno + datos urbanísticos GCBA \
+  cruzados automáticamente por sus coordenadas (no necesitás llamar tools de GCBA \
+  aparte si usás ésta).
+- `historial_precios(terreno_id)` muestra todos los cambios de precio detectados.
+- `terrenos_con_bajas(dias)` lista los terrenos cuyo precio bajó en los últimos N \
+  días, ordenados por mayor caída.
+- `generar_informe(terreno_id)` arma un PDF profesional con todo el cruce \
+  (ZonaProp + normativa GCBA + historial).
+
 Respondé en español, con tono profesional pero claro. Cuando uses datos de las \
 tools, citá el SMP y los valores concretos. Usá tablas markdown para datos \
-tabulares (FOT, alturas, plusvalía). Si una tool devuelve un error, informalo y \
-sugerí qué intentar (ej: verificar la dirección).
+tabulares (FOT, alturas, plusvalía, listados de terrenos). Si una tool devuelve un \
+error, informalo y sugerí qué intentar (ej: verificar la dirección, o probar otra \
+zona).
 
 Cuando consultes una parcela específica y el usuario no haya pedido lo contrario, \
 llamá también `get_fotos_parcela` y `get_geometria_parcela` — el frontend las \
@@ -97,6 +112,11 @@ app.add_middleware(
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
+
+
+@app.on_event("startup")
+async def _startup() -> None:
+    await db.init_db()
 
 
 class ChatMessage(BaseModel):

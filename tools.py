@@ -8,7 +8,12 @@ el backend del chat web (web.py) importan desde acá.
 
 from __future__ import annotations
 
+import asyncio
+
 import httpx
+
+import database as db
+import report_generator
 
 # ── Base URLs ──────────────────────────────────────────────────────────────────
 EPOK = "https://epok.buenosaires.gob.ar"
@@ -139,6 +144,131 @@ def get_informe_completo(smp: str) -> dict:
         "estado_parcelario": _get(
             f"{EPOK}/cur3d/constitucion_estado_parcelario/", params={"smp": smp}
         ),
+    }
+
+
+# ── ZonaProp terrenos (SQLite cache + scraper) ────────────────────────────────
+# Wrappers sync que corren las funciones async del módulo database. Usan
+# asyncio.run() porque las tools del registry se invocan desde threads (vía
+# asyncio.to_thread) y por lo tanto no hay loop activo en ese contexto.
+
+
+def buscar_terrenos(
+    zona: str | None = None,
+    precio_max: float | None = None,
+    superficie_min: float | None = None,
+) -> dict:
+    filters = {
+        "zona": zona,
+        "precio_max": precio_max,
+        "superficie_min": superficie_min,
+    }
+    filters = {k: v for k, v in filters.items() if v is not None}
+
+    async def _run():
+        items = await db.get_terrenos(filters=filters, limit=50)
+        total = await db.count_terrenos()
+        return {"count": len(items), "total_en_db": total, "results": items}
+
+    return asyncio.run(_run())
+
+
+def terreno_detalle(terreno_id: str) -> dict:
+    async def _fetch():
+        return await db.get_terreno_by_id(terreno_id)
+
+    listing = asyncio.run(_fetch())
+    if not listing:
+        return {
+            "error": f"terreno {terreno_id} no encontrado en cache",
+        }
+
+    out: dict = {"listing": listing, "gcba": {}}
+    lat = listing.get("lat")
+    lng = listing.get("lng")
+    if lat is None or lng is None:
+        out["gcba"]["error"] = "el listing no tiene coordenadas"
+        return out
+
+    parcela = get_parcela_por_coordenadas(lng=lng, lat=lat)
+    out["gcba"]["parcela"] = parcela
+    out["gcba"]["contexto"] = get_datos_contextuales(lng=lng, lat=lat)
+
+    smp = None
+    if isinstance(parcela, dict):
+        smp = parcela.get("smp") or parcela.get("SMP")
+    if smp:
+        out["gcba"]["smp"] = smp
+        out["gcba"]["edificabilidad"] = get_edificabilidad(smp)
+        out["gcba"]["afectaciones"] = get_afectaciones(smp)
+        out["gcba"]["plusvalia"] = get_plusvalia(smp)
+        out["gcba"]["usos"] = get_usos_del_suelo(smp)
+
+    return out
+
+
+def terrenos_con_bajas(dias: int = 7) -> dict:
+    async def _run():
+        return await db.get_terrenos_con_bajas(dias=dias)
+
+    items = asyncio.run(_run())
+    return {"dias": dias, "count": len(items), "results": items}
+
+
+def historial_precios(terreno_id: str) -> dict:
+    async def _run():
+        listing = await db.get_terreno_by_id(terreno_id)
+        cambios = await db.get_historial_precio(terreno_id)
+        return listing, cambios
+
+    listing, cambios = asyncio.run(_run())
+    return {
+        "terreno_id": terreno_id,
+        "listing": listing,
+        "cambios": cambios,
+        "total_cambios": len(cambios),
+    }
+
+
+def generar_informe(terreno_id: str) -> dict:
+    async def _fetch():
+        listing = await db.get_terreno_by_id(terreno_id)
+        cambios = await db.get_historial_precio(terreno_id)
+        return listing, cambios
+
+    listing, historial = asyncio.run(_fetch())
+    if not listing:
+        return {"error": f"terreno {terreno_id} no encontrado en cache"}
+
+    gcba: dict = {}
+    lat = listing.get("lat")
+    lng = listing.get("lng")
+    if lat is not None and lng is not None:
+        parcela = get_parcela_por_coordenadas(lng=lng, lat=lat)
+        gcba["parcela"] = parcela
+        gcba["contexto"] = get_datos_contextuales(lng=lng, lat=lat)
+        smp = None
+        if isinstance(parcela, dict):
+            smp = parcela.get("smp") or parcela.get("SMP")
+        if smp:
+            gcba["smp"] = smp
+            gcba["edificabilidad"] = get_edificabilidad(smp)
+            gcba["afectaciones"] = get_afectaciones(smp)
+            gcba["plusvalia"] = get_plusvalia(smp)
+            gcba["usos"] = get_usos_del_suelo(smp)
+            gcba["patrimonio"] = get_patrimonio(smp)
+
+    pdf_path = report_generator.generate_report({
+        "listing": listing,
+        "gcba": gcba,
+        "historial": historial,
+    })
+
+    return {
+        "ok": True,
+        "terreno_id": terreno_id,
+        "pdf_path": pdf_path,
+        "message": f"Informe generado y guardado en: {pdf_path}",
     }
 
 
@@ -358,6 +488,105 @@ TOOL_REGISTRY: dict[str, dict] = {
             "type": "object",
             "properties": {"smp": {"type": "string"}},
             "required": ["smp"],
+        },
+    },
+    "buscar_terrenos": {
+        "fn": buscar_terrenos,
+        "description": (
+            "Busca terrenos en venta en CABA scrapeados desde ZonaProp y cacheados en "
+            "SQLite. Filtros opcionales por zona (substring contra dirección/título), "
+            "precio máximo y superficie mínima. Devuelve hasta 50 listings con id, "
+            "title, price, currency, surface_total, address, lat/lng y URL."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "zona": {
+                    "type": "string",
+                    "description": "Substring case-insensitive para barrio/dirección, ej: 'Palermo'.",
+                },
+                "precio_max": {
+                    "type": "integer",
+                    "description": "Precio máximo en la moneda nominal del listing (USD o ARS).",
+                },
+                "superficie_min": {
+                    "type": "integer",
+                    "description": "Superficie total mínima en m².",
+                },
+            },
+        },
+    },
+    "terreno_detalle": {
+        "fn": terreno_detalle,
+        "description": (
+            "Devuelve un terreno cacheado de ZonaProp y lo cruza automáticamente con "
+            "los datos urbanísticos de GCBA (parcela, edificabilidad, afectaciones, "
+            "plusvalía, usos, contexto) usando lat/lng del listing. Ideal cuando el "
+            "usuario pregunta '¿qué se puede construir en este terreno?'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "terreno_id": {
+                    "type": "string",
+                    "description": "postingId del listing de ZonaProp (campo `id` de buscar_terrenos).",
+                },
+            },
+            "required": ["terreno_id"],
+        },
+    },
+    "terrenos_con_bajas": {
+        "fn": terrenos_con_bajas,
+        "description": (
+            "Lista terrenos cuyo precio bajó en los últimos N días, ordenados por la "
+            "mayor caída absoluta. Útil para detectar oportunidades."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "dias": {
+                    "type": "integer",
+                    "description": "Ventana en días hacia atrás. Default 7.",
+                    "default": 7,
+                },
+            },
+        },
+    },
+    "historial_precios": {
+        "fn": historial_precios,
+        "description": (
+            "Evolución de precios de un terreno: todos los cambios detectados en "
+            "scrapes sucesivos (precio anterior → precio nuevo) ordenados "
+            "cronológicamente."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "terreno_id": {
+                    "type": "string",
+                    "description": "postingId del listing de ZonaProp.",
+                },
+            },
+            "required": ["terreno_id"],
+        },
+    },
+    "generar_informe": {
+        "fn": generar_informe,
+        "description": (
+            "Genera un informe PDF profesional para un terreno cacheado, cruzando los "
+            "datos de ZonaProp con normativa GCBA (parcela, edificabilidad, "
+            "afectaciones, patrimonio, usos) e historial de precios. Devuelve la ruta "
+            "del PDF generado en el servidor."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "terreno_id": {
+                    "type": "string",
+                    "description": "postingId del listing de ZonaProp.",
+                },
+            },
+            "required": ["terreno_id"],
         },
     },
 }
