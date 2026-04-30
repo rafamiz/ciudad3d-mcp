@@ -266,21 +266,28 @@ def _build_styles() -> dict[str, ParagraphStyle]:
     }
 
 
-def _kv_table(rows: list[tuple[str, str]], col_widths: tuple[float, float] = (5 * cm, 11 * cm)) -> Table:
-    """Tabla 2 columnas key/value con filas alternadas."""
-    data = [[k, v] for k, v in rows]
+def _kv_table(
+    rows: list[tuple[Any, Any]],
+    styles: dict,
+    col_widths: tuple[float, float] = (4.5 * cm, 11.5 * cm),
+) -> Table:
+    """Tabla 2 columnas key/value con filas alternadas.
+
+    Tanto el label como el value se envuelven en Paragraph para que el texto
+    largo se ajuste correctamente al ancho de la columna.
+    """
+    data = []
+    for k, v in rows:
+        label = k if not isinstance(k, str) else Paragraph(k, styles["label"])
+        value = v if not isinstance(v, str) else Paragraph(v, styles["value"])
+        data.append([label, value])
     t = Table(data, colWidths=list(col_widths))
     style = [
-        ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
-        ("FONTNAME", (1, 0), (1, -1), "Helvetica"),
-        ("FONTSIZE", (0, 0), (-1, -1), 10),
-        ("TEXTCOLOR", (0, 0), (0, -1), COLOR_PRIMARY),
-        ("TEXTCOLOR", (1, 0), (1, -1), COLOR_TEXT),
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
         ("LEFTPADDING", (0, 0), (-1, -1), 8),
         ("RIGHTPADDING", (0, 0), (-1, -1), 8),
-        ("TOPPADDING", (0, 0), (-1, -1), 5),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ("TOPPADDING", (0, 0), (-1, -1), 7),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
         ("LINEBELOW", (0, 0), (-1, -1), 0.4, COLOR_BORDER),
     ]
     for i in range(len(data)):
@@ -320,11 +327,9 @@ def _build_section_terreno(listing: dict, styles: dict) -> list:
     if listing.get("first_seen_at"):
         rows.append(("Visto por primera vez", _fmt_date(listing.get("first_seen_at"))))
 
-    rows_paragraphs = [(k, Paragraph(v, styles["value"])) for k, v in rows]
-
     elements: list = [
         Paragraph("1. Datos del terreno", styles["h2"]),
-        _kv_table(rows_paragraphs),
+        _kv_table(rows, styles),
     ]
 
     photo_url = _extract_first_photo(listing)
@@ -427,15 +432,13 @@ def _build_section_normativa(gcba: dict, styles: dict) -> list:
     if usos_str:
         rows.append(("Usos habilitados", usos_str))
 
-    rows_paragraphs = [(k, Paragraph(v, styles["value"])) for k, v in rows]
-
     elements: list = [Paragraph("2. Normativa urbanística", styles["h2"])]
     if not edif_ok:
         elements.append(Paragraph(
             "<i>No se pudieron obtener datos de edificabilidad de GCBA para este lote.</i>",
             styles["small"],
         ))
-    elements.append(_kv_table(rows_paragraphs))
+    elements.append(_kv_table(rows, styles))
     return elements
 
 
@@ -450,7 +453,13 @@ def _summarize_usos(usos: Any) -> str:
         for i, count in enumerate(arr[:3]):
             label = nivels[i] if i < len(nivels) else f"Nivel {i + 1}"
             parts.append(f"{label}: {int(count)}")
-        return " | ".join(parts) + " (consultar mixtura completa en EPOK)"
+        main = " | ".join(parts)
+        return (
+            f"{main}<br/>"
+            f"<font size=\"8\" color=\"#666666\"><i>"
+            "Consultar mixtura completa en EPOK"
+            "</i></font>"
+        )
 
     # Formas alternativas con listas nominadas
     candidates: list[str] = []
@@ -509,11 +518,9 @@ def _build_section_restricciones(gcba: dict, styles: dict) -> list:
     items.append(("Catalogación patrimonial", _format_catalogacion(patrim, edif)))
     items.append(("Monumento histórico nacional", _format_monumento(patrim)))
 
-    rows_paragraphs = [(k, Paragraph(v, styles["value"])) for k, v in items]
-
     return [
         Paragraph("3. Restricciones y afectaciones", styles["h2"]),
-        _kv_table(rows_paragraphs),
+        _kv_table(items, styles),
     ]
 
 
@@ -551,39 +558,59 @@ def _format_catalogacion(patrim: Any, edif: Any) -> str:
     """
     /cur3d/fichadecatalogacion devuelve {'exists': bool, 'has_error': bool}.
     edificabilidad.catalogacion devuelve un dict con denominacion, proteccion, etc.
+
+    Devuelve un string con markup de Paragraph: valor principal + sub-línea
+    pequeña con detalles cuando estén disponibles.
     """
+    def _detail_line(cat_edif: dict) -> str:
+        labels = (
+            ("denominacion", "denominación"),
+            ("proteccion", "protección"),
+            ("estado", "estado"),
+            ("ley_3056", "ley 3056"),
+        )
+        parts = []
+        for k, label in labels:
+            v = cat_edif.get(k)
+            if v not in (None, "", []):
+                parts.append(f"{label}: {v}")
+        if not parts:
+            return ""
+        return f"<br/><font size=\"8\" color=\"#666666\">{' · '.join(parts)}</font>"
+
+    def _nivel_proteccion(cat_edif: dict) -> str | None:
+        for k in ("proteccion", "denominacion"):
+            v = cat_edif.get(k)
+            if v not in (None, "", []):
+                return str(v)
+        return None
+
     cat_patrim = _safe_get(patrim, "catalogacion") if isinstance(patrim, dict) else None
+    cat_edif = _safe_get(edif, "catalogacion") if isinstance(edif, dict) else None
 
     if isinstance(cat_patrim, dict):
         if cat_patrim.get("has_error"):
             return "No disponible"
         if "exists" in cat_patrim:
             if cat_patrim.get("exists"):
-                return "Catalogada (consultar ficha oficial GCBA)"
-            # No catalogada según fichadecatalogacion; veamos si edif tiene detalle
-            cat_edif = _safe_get(edif, "catalogacion") if isinstance(edif, dict) else None
+                main = "Catalogada"
+                if isinstance(cat_edif, dict):
+                    nivel = _nivel_proteccion(cat_edif)
+                    if nivel:
+                        main = f"Catalogada — Nivel {nivel}"
+                    return main + _detail_line(cat_edif)
+                return main
+            # No catalogada según fichadecatalogacion
             if isinstance(cat_edif, dict):
-                detalles = []
-                for k in ("denominacion", "proteccion", "estado", "ley_3056", "catalogacion"):
-                    v = cat_edif.get(k)
-                    if v not in (None, "", []):
-                        detalles.append(f"{k}: {v}")
-                if detalles:
-                    return "Sin catalogación (detalle: " + "; ".join(detalles) + ")"
-            return "Sin catalogación patrimonial"
+                return "Sin catalogación" + _detail_line(cat_edif)
+            return "Sin catalogación"
 
-    # Fallback: usar lo que venga en edificabilidad
-    cat_edif = _safe_get(edif, "catalogacion") if isinstance(edif, dict) else None
     if isinstance(cat_edif, dict):
-        # Si todos los campos son None/vacío, no catalogada
-        all_empty = all(v in (None, "", []) for v in cat_edif.values())
-        if all_empty:
-            return "Sin catalogación patrimonial"
-        for k in ("denominacion", "proteccion", "estado"):
-            v = cat_edif.get(k)
-            if v:
-                return f"Catalogada — {k}: {v}"
-        return "Catalogada (ver ficha GCBA)"
+        if all(v in (None, "", []) for v in cat_edif.values()):
+            return "Sin catalogación"
+        nivel = _nivel_proteccion(cat_edif)
+        main = f"Catalogada — Nivel {nivel}" if nivel else "Catalogada"
+        return main + _detail_line(cat_edif)
 
     return "No disponible"
 
@@ -687,8 +714,7 @@ def _build_section_potencial(listing: dict, gcba: dict, styles: dict) -> list:
         cur = (listing.get("currency") or "USD").upper()
         rows.append(("Incidencia (precio / m² construible)", f"{cur} {incidencia:,.0f}/m²".replace(",", ".")))
 
-    rows_paragraphs = [(k, Paragraph(v, styles["value"])) for k, v in rows]
-    elements.append(_kv_table(rows_paragraphs))
+    elements.append(_kv_table(rows, styles))
     elements.append(Spacer(1, 6))
     elements.append(Paragraph(
         "<i>Estimación referencial. La capacidad real depende de retiros, alturas "
