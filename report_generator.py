@@ -99,6 +99,111 @@ def _first_present(*values: Any) -> Any:
     return None
 
 
+def _is_error_payload(value: Any) -> bool:
+    """True si la respuesta es un dict con clave 'error' o 'has_error'."""
+    if not isinstance(value, dict):
+        return False
+    if "error" in value:
+        return True
+    if value.get("has_error"):
+        return True
+    return False
+
+
+def _extract_fot_value(fot: Any) -> float | None:
+    """Devuelve un FOT numérico representativo (máximo de las variantes)."""
+    if fot is None:
+        return None
+    if isinstance(fot, (int, float)):
+        return float(fot) if fot > 0 else None
+    if isinstance(fot, dict):
+        candidates: list[float] = []
+        for k in ("fot_medianera", "fot_perim_libre", "fot_semi_libre", "fot", "FOT"):
+            v = fot.get(k)
+            if isinstance(v, (int, float)) and v > 0:
+                candidates.append(float(v))
+        if candidates:
+            return max(candidates)
+        return None
+    try:
+        f = float(fot)
+        return f if f > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _format_fot_breakdown(fot: Any) -> str:
+    """Renderiza el FOT como 'Medianera: X | Perím. libre: Y | Semi-libre: Z'."""
+    if fot is None:
+        return "No disponible"
+    if isinstance(fot, (int, float)):
+        return _fmt_num(fot)
+    if isinstance(fot, dict):
+        labels = (
+            ("fot_medianera", "Medianera"),
+            ("fot_perim_libre", "Perím. libre"),
+            ("fot_semi_libre", "Semi-libre"),
+        )
+        parts = []
+        for key, label in labels:
+            v = fot.get(key)
+            if isinstance(v, (int, float)):
+                parts.append(f"{label}: {_fmt_num(v)}")
+        if parts:
+            return " | ".join(parts)
+        # Fallback: si no matchea ninguna clave conocida pero hay valores
+        for k, v in fot.items():
+            if isinstance(v, (int, float)):
+                parts.append(f"{k}: {_fmt_num(v)}")
+        if parts:
+            return " | ".join(parts)
+        return "No disponible"
+    return str(fot)
+
+
+def _extract_altura_value(altura: Any) -> float | None:
+    """Para `altura_max` que viene como [17.2, 0, 0, 0]."""
+    if altura is None:
+        return None
+    if isinstance(altura, (int, float)):
+        return float(altura) if altura > 0 else None
+    if isinstance(altura, list):
+        valid = [float(x) for x in altura if isinstance(x, (int, float)) and x > 0]
+        if valid:
+            return max(valid)
+        return None
+    try:
+        f = float(altura)
+        return f if f > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _extract_distrito(edif: dict, parcela: dict) -> str | None:
+    """Busca el distrito/zona urbanística en varias rutas posibles."""
+    # plusvalia.distrito_cpu es el lugar más confiable en seccion_edificabilidad
+    cpu = _safe_get(edif, "plusvalia", "distrito_cpu")
+    if cpu:
+        return str(cpu)
+
+    # distrito_especial: array de dicts con distrito_agrupado y distrito_especifico
+    de = edif.get("distrito_especial") if isinstance(edif, dict) else None
+    if isinstance(de, list):
+        for d in de:
+            if isinstance(d, dict):
+                val = d.get("distrito_especifico") or d.get("distrito_agrupado")
+                if val and str(val).strip():
+                    return str(val)
+
+    # Fallbacks legacy
+    return _first_present(
+        _safe_get(edif, "distrito"),
+        _safe_get(edif, "zonificacion"),
+        _safe_get(edif, "codigo_urbanistico", "distrito"),
+        _safe_get(parcela, "distrito"),
+    )
+
+
 def _download_image(url: str, max_bytes: int = 4_000_000) -> io.BytesIO | None:
     try:
         r = httpx.get(url, timeout=8.0, follow_redirects=True)
@@ -259,33 +364,63 @@ def _build_section_normativa(gcba: dict, styles: dict) -> list:
     parcela = gcba.get("parcela") or {}
     usos = gcba.get("usos") or {}
 
-    distrito = _first_present(
-        _safe_get(edif, "distrito"),
-        _safe_get(edif, "zonificacion"),
-        _safe_get(edif, "codigo_urbanistico", "distrito"),
-        _safe_get(parcela, "distrito"),
-    )
-    fot = _first_present(_safe_get(edif, "fot"), _safe_get(edif, "FOT"))
-    fos = _first_present(_safe_get(edif, "fos"), _safe_get(edif, "FOS"))
-    altura = _first_present(
-        _safe_get(edif, "altura_maxima"),
-        _safe_get(edif, "alturaMaxima"),
-        _safe_get(edif, "altura"),
-    )
+    edif_ok = isinstance(edif, dict) and not _is_error_payload(edif)
+    parcela_ok = isinstance(parcela, dict) and not _is_error_payload(parcela)
+
+    distrito = _extract_distrito(edif if edif_ok else {}, parcela if parcela_ok else {})
+    fot_raw = _safe_get(edif, "fot") if edif_ok else None
+    fos_raw = _safe_get(edif, "fos") if edif_ok else None  # No suele venir
+    altura_raw = (
+        _safe_get(edif, "altura_max")
+        or _safe_get(edif, "altura_maxima")
+        or _safe_get(edif, "alturaMaxima")
+        or _safe_get(edif, "altura")
+    ) if edif_ok else None
+    altura_plano = _safe_get(edif, "altura_max_plano_limite") if edif_ok else None
     sup_edif = _first_present(
-        _safe_get(edif, "superficie_edificable"),
-        _safe_get(edif, "superficieEdificable"),
+        _safe_get(edif, "sup_edificable_planta") if edif_ok else None,
+        _safe_get(edif, "sup_max_edificable") if edif_ok else None,
+        _safe_get(edif, "superficie_edificable") if edif_ok else None,
+        _safe_get(edif, "superficieEdificable") if edif_ok else None,
     )
-    smp = _first_present(_safe_get(parcela, "smp"), _safe_get(parcela, "SMP"), gcba.get("smp"))
+    sup_parcela = _safe_get(edif, "superficie_parcela") if edif_ok else None
+    smp = _first_present(
+        _safe_get(parcela, "smp") if parcela_ok else None,
+        _safe_get(parcela, "SMP") if parcela_ok else None,
+        gcba.get("smp"),
+    )
+    subzona = _safe_get(edif, "subzona") if edif_ok else None
+
+    altura_val = _extract_altura_value(altura_raw)
 
     rows: list[tuple[str, str]] = [
-        ("SMP (Sección-Manzana-Parcela)", str(smp) if smp else "—"),
-        ("Distrito / Zona", str(distrito) if distrito else "—"),
-        ("FOT (Factor de Ocupación Total)", _fmt_num(fot) if fot is not None else "—"),
-        ("FOS (Factor de Ocupación del Suelo)", _fmt_num(fos) if fos is not None else "—"),
-        ("Altura máxima", f"{altura} m" if altura is not None else "—"),
-        ("Superficie edificable (CUR)", _fmt_m2(sup_edif) if sup_edif else "—"),
+        ("SMP (Sección-Manzana-Parcela)", str(smp) if smp else "No disponible"),
+        ("Distrito / Zona", str(distrito) if distrito else "No disponible"),
     ]
+    if subzona and str(subzona).strip():
+        rows.append(("Subzona", str(subzona)))
+
+    rows.append(("FOT (Factor de Ocupación Total)", _format_fot_breakdown(fot_raw)))
+    rows.append((
+        "FOS (Factor de Ocupación del Suelo)",
+        _fmt_num(fos_raw) if fos_raw is not None else "No disponible (no provisto por API)",
+    ))
+
+    if altura_val is not None:
+        rows.append(("Altura máxima", f"{_fmt_num(altura_val)} m"))
+    else:
+        rows.append(("Altura máxima", "No disponible"))
+
+    if isinstance(altura_plano, (int, float)) and altura_plano > 0:
+        rows.append(("Altura máx. plano límite", f"{_fmt_num(altura_plano)} m"))
+
+    if isinstance(sup_parcela, (int, float)) and sup_parcela > 0:
+        rows.append(("Superficie de parcela (CUR)", _fmt_m2(sup_parcela)))
+
+    if isinstance(sup_edif, (int, float)) and sup_edif > 0:
+        rows.append(("Superficie edificable (CUR)", _fmt_m2(sup_edif)))
+    else:
+        rows.append(("Superficie edificable (CUR)", "No disponible"))
 
     usos_str = _summarize_usos(usos)
     if usos_str:
@@ -293,17 +428,32 @@ def _build_section_normativa(gcba: dict, styles: dict) -> list:
 
     rows_paragraphs = [(k, Paragraph(v, styles["value"])) for k, v in rows]
 
-    return [
-        Paragraph("2. Normativa urbanística", styles["h2"]),
-        _kv_table(rows_paragraphs),
-    ]
+    elements: list = [Paragraph("2. Normativa urbanística", styles["h2"])]
+    if not edif_ok:
+        elements.append(Paragraph(
+            "<i>No se pudieron obtener datos de edificabilidad de GCBA para este lote.</i>",
+            styles["small"],
+        ))
+    elements.append(_kv_table(rows_paragraphs))
+    return elements
 
 
 def _summarize_usos(usos: Any) -> str:
-    if not isinstance(usos, dict) or usos.get("error"):
+    if not isinstance(usos, dict) or _is_error_payload(usos):
         return ""
+    # Forma frecuente del endpoint: {"usos": [n1, n2, n3]} con conteos por nivel
+    arr = usos.get("usos")
+    if isinstance(arr, list) and len(arr) >= 1 and all(isinstance(x, (int, float)) for x in arr):
+        nivels = ["Nivel 1", "Nivel 2", "Nivel 3"]
+        parts = []
+        for i, count in enumerate(arr[:3]):
+            label = nivels[i] if i < len(nivels) else f"Nivel {i + 1}"
+            parts.append(f"{label}: {int(count)}")
+        return " | ".join(parts) + " (consultar mixtura completa en EPOK)"
+
+    # Formas alternativas con listas nominadas
     candidates: list[str] = []
-    for key in ("nivel1", "nivel2", "nivel3", "categorias", "rubros", "usos"):
+    for key in ("nivel1", "nivel2", "nivel3", "categorias", "rubros"):
         val = usos.get(key)
         if isinstance(val, list):
             for item in val[:5]:
@@ -320,31 +470,43 @@ def _summarize_usos(usos: Any) -> str:
 
 def _build_section_restricciones(gcba: dict, styles: dict) -> list:
     afect = gcba.get("afectaciones") or {}
+    edif = gcba.get("edificabilidad") or {}
     patrim = gcba.get("patrimonio") or {}
+
+    # Las afectaciones pueden venir tanto en /cur3d/afectaciones como anidadas
+    # dentro de edificabilidad. Mergeamos con prioridad al endpoint dedicado.
+    afect_edif = _safe_get(edif, "afectaciones") if isinstance(edif, dict) else None
+    afect_merged: dict = {}
+    if isinstance(afect_edif, dict):
+        afect_merged.update(afect_edif)
+    if isinstance(afect, dict) and not _is_error_payload(afect):
+        afect_merged.update(afect)
 
     items: list[tuple[str, str]] = []
 
     riesgo = _first_present(
-        _safe_get(afect, "riesgo_hidrico"),
-        _safe_get(afect, "riesgoHidrico"),
-        _safe_get(afect, "hidrico"),
+        afect_merged.get("riesgo_hidrico"),
+        afect_merged.get("riesgoHidrico"),
+        afect_merged.get("hidrico"),
     )
-    items.append(("Riesgo hídrico", _stringify(riesgo)))
+    items.append(("Riesgo hídrico", _format_afectacion(riesgo)))
 
-    lep = _first_present(_safe_get(afect, "lep"), _safe_get(afect, "LEP"))
-    items.append(("Línea de Edificación (LEP)", _stringify(lep)))
+    lep = _first_present(afect_merged.get("lep"), afect_merged.get("LEP"))
+    items.append(("Línea de Edificación (LEP)", _format_afectacion(lep)))
 
     ensanche = _first_present(
-        _safe_get(afect, "ensanche"),
-        _safe_get(afect, "apertura"),
-        _safe_get(afect, "apertura_calle"),
+        afect_merged.get("ensanche"),
+        afect_merged.get("apertura"),
+        afect_merged.get("apertura_calle"),
     )
-    items.append(("Ensanche / apertura de calle", _stringify(ensanche)))
+    items.append(("Ensanche / apertura de calle", _format_afectacion(ensanche)))
 
-    catalog = _safe_get(patrim, "catalogacion")
-    monumento = _safe_get(patrim, "monumento_historico_nacional")
-    items.append(("Catalogación patrimonial", _stringify(catalog)))
-    items.append(("Monumento histórico nacional", _stringify(monumento)))
+    ci_digital = afect_merged.get("ci_digital")
+    if ci_digital is not None:
+        items.append(("CI digital", _format_afectacion(ci_digital)))
+
+    items.append(("Catalogación patrimonial", _format_catalogacion(patrim, edif)))
+    items.append(("Monumento histórico nacional", _format_monumento(patrim)))
 
     rows_paragraphs = [(k, Paragraph(v, styles["value"])) for k, v in items]
 
@@ -354,53 +516,151 @@ def _build_section_restricciones(gcba: dict, styles: dict) -> list:
     ]
 
 
-def _stringify(value: Any) -> str:
-    if value in (None, "", [], {}):
-        return "Sin afectación / sin datos"
+def _format_afectacion(value: Any) -> str:
+    """API devuelve 0/1 (o None) por afectación. 0 = sin afectación."""
+    if value is None:
+        return "No disponible"
     if isinstance(value, bool):
-        return "Sí" if value else "No"
+        return "Sí" if value else "Sin afectación"
     if isinstance(value, (int, float)):
-        return str(value)
+        if value == 0:
+            return "Sin afectación"
+        if value == 1:
+            return "Sí"
+        return f"Sí ({_fmt_num(value)})"
     if isinstance(value, str):
+        if not value.strip():
+            return "Sin afectación"
         return value
     if isinstance(value, dict):
-        if value.get("error"):
-            return "Sin datos"
+        if _is_error_payload(value):
+            return "No disponible"
         for k in ("descripcion", "nombre", "valor", "estado", "categoria"):
             if value.get(k):
                 return str(value[k])
-        try:
-            return json.dumps(value, ensure_ascii=False)[:120]
-        except Exception:
-            return "Sí (ver detalle)"
+        return "Ver detalle (datos crudos)"
     if isinstance(value, list):
         if not value:
             return "Sin afectación"
-        return f"{len(value)} item(s)"
+        return f"{len(value)} ítem(s)"
     return str(value)
+
+
+def _format_catalogacion(patrim: Any, edif: Any) -> str:
+    """
+    /cur3d/fichadecatalogacion devuelve {'exists': bool, 'has_error': bool}.
+    edificabilidad.catalogacion devuelve un dict con denominacion, proteccion, etc.
+    """
+    cat_patrim = _safe_get(patrim, "catalogacion") if isinstance(patrim, dict) else None
+
+    if isinstance(cat_patrim, dict):
+        if cat_patrim.get("has_error"):
+            return "No disponible"
+        if "exists" in cat_patrim:
+            if cat_patrim.get("exists"):
+                return "Catalogada (consultar ficha oficial GCBA)"
+            # No catalogada según fichadecatalogacion; veamos si edif tiene detalle
+            cat_edif = _safe_get(edif, "catalogacion") if isinstance(edif, dict) else None
+            if isinstance(cat_edif, dict):
+                detalles = []
+                for k in ("denominacion", "proteccion", "estado", "ley_3056", "catalogacion"):
+                    v = cat_edif.get(k)
+                    if v not in (None, "", []):
+                        detalles.append(f"{k}: {v}")
+                if detalles:
+                    return "Sin catalogación (detalle: " + "; ".join(detalles) + ")"
+            return "Sin catalogación patrimonial"
+
+    # Fallback: usar lo que venga en edificabilidad
+    cat_edif = _safe_get(edif, "catalogacion") if isinstance(edif, dict) else None
+    if isinstance(cat_edif, dict):
+        # Si todos los campos son None/vacío, no catalogada
+        all_empty = all(v in (None, "", []) for v in cat_edif.values())
+        if all_empty:
+            return "Sin catalogación patrimonial"
+        for k in ("denominacion", "proteccion", "estado"):
+            v = cat_edif.get(k)
+            if v:
+                return f"Catalogada — {k}: {v}"
+        return "Catalogada (ver ficha GCBA)"
+
+    return "No disponible"
+
+
+def _format_monumento(patrim: Any) -> str:
+    """
+    /cur3d/monumento_historico_nacional devuelve {'data': [...], 'has_error': bool}.
+    """
+    m = _safe_get(patrim, "monumento_historico_nacional") if isinstance(patrim, dict) else None
+    if not isinstance(m, dict):
+        return "No disponible"
+    if m.get("has_error"):
+        return "No disponible"
+    data = m.get("data")
+    if isinstance(data, list):
+        if not data:
+            return "Sin declaratoria"
+        return f"Declarado MHN ({len(data)} registro(s))"
+    if data:
+        return "Declarado MHN"
+    return "Sin declaratoria"
 
 
 def _build_section_potencial(listing: dict, gcba: dict, styles: dict) -> list:
     surface = listing.get("surface_total")
     edif = gcba.get("edificabilidad") or {}
-    fot = _first_present(_safe_get(edif, "fot"), _safe_get(edif, "FOT"))
-    altura = _first_present(_safe_get(edif, "altura_maxima"), _safe_get(edif, "alturaMaxima"))
+
+    fot_raw = _safe_get(edif, "fot") if isinstance(edif, dict) else None
+    fot_f = _extract_fot_value(fot_raw)
+    altura_raw = (
+        _safe_get(edif, "altura_max")
+        or _safe_get(edif, "altura_maxima")
+        or _safe_get(edif, "alturaMaxima")
+    ) if isinstance(edif, dict) else None
+    altura_val = _extract_altura_value(altura_raw)
+
+    # Preferir la superficie de parcela del CUR (más precisa) si existe
+    sup_parcela_cur = _safe_get(edif, "superficie_parcela") if isinstance(edif, dict) else None
+    surface_for_calc = surface if surface is not None else sup_parcela_cur
 
     elements: list = [Paragraph("4. Análisis de potencial constructivo", styles["h2"])]
 
-    if surface is None or fot is None:
+    try:
+        surface_f = float(surface_for_calc) if surface_for_calc is not None else None
+    except (TypeError, ValueError):
+        surface_f = None
+
+    if surface_f is None and fot_f is None:
         elements.append(Paragraph(
-            "No se puede estimar el potencial constructivo por falta de datos "
-            "(superficie del lote y/o FOT no disponibles).",
+            "No se puede estimar el potencial constructivo: ni superficie del lote "
+            "ni FOT están disponibles.",
             styles["body"],
         ))
         return elements
 
-    try:
-        surface_f = float(surface)
-        fot_f = float(fot)
-    except (TypeError, ValueError):
-        elements.append(Paragraph("Datos no numéricos; no se puede calcular.", styles["body"]))
+    if surface_f is None:
+        elements.append(Paragraph(
+            f"FOT aplicable: <b>{_fmt_num(fot_f)}</b>. No se puede calcular m² "
+            "construibles porque falta la superficie del lote.",
+            styles["body"],
+        ))
+        return elements
+
+    if fot_f is None:
+        # Mostrar al menos el desglose del FOT si vino como dict con ceros u otra forma
+        fot_display = _format_fot_breakdown(fot_raw) if fot_raw is not None else "No disponible"
+        elements.append(Paragraph(
+            f"Superficie del lote: <b>{_fmt_m2(surface_f)}</b>. FOT aplicable: "
+            f"<b>{fot_display}</b>. No se puede estimar m² construibles sin un FOT "
+            "numérico mayor a cero.",
+            styles["body"],
+        ))
+        if altura_val is not None:
+            elements.append(Spacer(1, 4))
+            elements.append(Paragraph(
+                f"Altura máxima permitida: <b>{_fmt_num(altura_val)} m</b>.",
+                styles["body"],
+            ))
         return elements
 
     m2_construibles = surface_f * fot_f
@@ -415,12 +675,13 @@ def _build_section_potencial(listing: dict, gcba: dict, styles: dict) -> list:
 
     rows: list[tuple[str, str]] = [
         ("Superficie del lote", _fmt_m2(surface_f)),
-        ("FOT aplicable", _fmt_num(fot_f)),
+        ("FOT aplicable (máx. variantes)", _fmt_num(fot_f)),
+        ("Detalle FOT", _format_fot_breakdown(fot_raw)),
         ("Metros² construibles estimados", f"{m2_construibles:,.0f} m²".replace(",", ".")),
         ("Unidades posibles (60 m² c/u)", f"{unidades_60} unidades"),
     ]
-    if altura is not None:
-        rows.append(("Altura máxima permitida", f"{altura} m"))
+    if altura_val is not None:
+        rows.append(("Altura máxima permitida", f"{_fmt_num(altura_val)} m"))
     if incidencia is not None:
         cur = (listing.get("currency") or "USD").upper()
         rows.append(("Incidencia (precio / m² construible)", f"{cur} {incidencia:,.0f}/m²".replace(",", ".")))
