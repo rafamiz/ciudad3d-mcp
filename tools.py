@@ -50,6 +50,80 @@ def get_parcela_por_coordenadas(lng: float, lat: float) -> dict:
     return _get(f"{EPOK}/catastro/parcela/", params={"lng": lng, "lat": lat})
 
 
+def _parcela_es_valida(p: object) -> bool:
+    return (
+        isinstance(p, dict)
+        and bool(p)
+        and not p.get("error")
+        and bool(p.get("smp") or p.get("SMP"))
+    )
+
+
+# Offsets en grados ≈ 10–25m. Se prueban en orden creciente para evitar
+# saltar de parcela cuando el punto cae justo sobre el eje de la calzada
+# (EPOK devuelve {} en ese caso).
+_NUDGES = (
+    (0.0001, 0.0), (-0.0001, 0.0), (0.0, 0.0001), (0.0, -0.0001),
+    (0.0002, 0.0), (-0.0002, 0.0), (0.0, 0.0002), (0.0, -0.0002),
+)
+
+
+def _parcela_por_coordenadas_con_nudge(lng: float, lat: float) -> dict:
+    """get_parcela_por_coordenadas con búsqueda perpendicular mínima cuando el
+    punto cae sobre el eje de la calle y EPOK devuelve {}."""
+    parcela = get_parcela_por_coordenadas(lng=lng, lat=lat)
+    if _parcela_es_valida(parcela):
+        return parcela
+    for d_lat, d_lng in _NUDGES:
+        cand = get_parcela_por_coordenadas(lng=lng + d_lng, lat=lat + d_lat)
+        if _parcela_es_valida(cand):
+            return cand
+    return parcela if isinstance(parcela, dict) else {}
+
+
+def _resolver_parcela_listing(listing: dict) -> tuple[float | None, float | None, dict]:
+    """Resuelve la parcela GCBA de un listing de ZonaProp.
+
+    Orden:
+    1) Normalizar `address` con USIG y consultar EPOK por coords resultantes.
+    2) Fallback: usar lat/lng originales del listing.
+
+    Ambas vías aplican `_parcela_por_coordenadas_con_nudge` porque el punto
+    interpolado por USIG (y a veces el de ZonaProp) cae sobre la calzada.
+
+    Devuelve (lng, lat, parcela). lng/lat son las coordenadas efectivamente
+    usadas para la consulta exitosa, o las de fallback si todo falló.
+    """
+    address = (listing.get("address") or "").strip()
+    if address:
+        normalized = resolver_direccion(address)
+        if isinstance(normalized, dict):
+            candidatos = normalized.get("direccionesNormalizadas") or []
+            for cand in candidatos:
+                if cand.get("cod_partido") != "caba":
+                    continue
+                coords = cand.get("coordenadas") or {}
+                try:
+                    lng_n = float(coords.get("x"))
+                    lat_n = float(coords.get("y"))
+                except (TypeError, ValueError):
+                    continue
+                parcela = _parcela_por_coordenadas_con_nudge(lng_n, lat_n)
+                if _parcela_es_valida(parcela):
+                    return lng_n, lat_n, parcela
+
+    lat = listing.get("lat")
+    lng = listing.get("lng")
+    if lat is None or lng is None:
+        return None, None, {}
+    try:
+        lng_f = float(lng)
+        lat_f = float(lat)
+    except (TypeError, ValueError):
+        return None, None, {}
+    return lng_f, lat_f, _parcela_por_coordenadas_con_nudge(lng_f, lat_f)
+
+
 def get_parcela_por_smp(smp: str) -> dict:
     return _get(f"{EPOK}/catastro/parcela/", params={"smp": smp})
 
@@ -187,13 +261,11 @@ def terreno_detalle(terreno_id: str) -> dict:
         }
 
     out: dict = {"listing": listing, "gcba": {}}
-    lat = listing.get("lat")
-    lng = listing.get("lng")
-    if lat is None or lng is None:
-        out["gcba"]["error"] = "el listing no tiene coordenadas"
+    lng, lat, parcela = _resolver_parcela_listing(listing)
+    if lng is None or lat is None:
+        out["gcba"]["error"] = "el listing no tiene dirección ni coordenadas resolubles"
         return out
 
-    parcela = get_parcela_por_coordenadas(lng=lng, lat=lat)
     out["gcba"]["parcela"] = parcela
     out["gcba"]["contexto"] = get_datos_contextuales(lng=lng, lat=lat)
 
@@ -247,10 +319,8 @@ def generar_informe(terreno_id: str) -> dict:
         return {"error": f"terreno {terreno_id} no encontrado en cache"}
 
     gcba: dict = {}
-    lat = listing.get("lat")
-    lng = listing.get("lng")
-    if lat is not None and lng is not None:
-        parcela = get_parcela_por_coordenadas(lng=lng, lat=lat)
+    lng, lat, parcela = _resolver_parcela_listing(listing)
+    if lng is not None and lat is not None:
         gcba["parcela"] = parcela
         gcba["contexto"] = get_datos_contextuales(lng=lng, lat=lat)
         smp = None
