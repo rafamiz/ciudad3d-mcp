@@ -7,7 +7,9 @@ Ideal para ejecutar desde cron, Railway scheduled jobs o GitHub Actions:
     python scraper_scheduler.py --max-pages 5
 
 Variables de entorno:
-    CIUDAD3D_DB_PATH: ruta de la base SQLite (default: ./ciudad3d.db)
+    DATABASE_URL: URL postgres (Railway). Si está seteada, escribe a Postgres.
+    CIUDAD3D_DB_PATH: ruta de la base SQLite (default: ./ciudad3d.db). Sólo
+        se usa cuando DATABASE_URL no está definida (modo local).
     SCRAPER_MAX_PAGES: máximo de páginas a scrapear (default: 20)
 """
 
@@ -36,55 +38,58 @@ async def run_job(max_pages: int) -> dict:
     logger.info("Scrape iniciado a las %s (max_pages=%d)", started_at.isoformat(), max_pages)
 
     await db.init_db()
-    listings = await scraper.scrape(max_pages=max_pages)
-    stats = await db.upsert_terrenos(listings)
+    try:
+        listings = await scraper.scrape(max_pages=max_pages)
+        stats = await db.upsert_terrenos(listings)
 
-    new_rows = await db.get_new_terrenos()
-    new_listings = [
-        {
-            "id": row["id"],
-            "price": row.get("price"),
-            "currency": row.get("currency"),
-            "surface_total": row.get("surface_total"),
-            "address": row.get("address"),
-            "url": row.get("url"),
+        new_rows = await db.get_new_terrenos()
+        new_listings = [
+            {
+                "id": row["id"],
+                "price": row.get("price"),
+                "currency": row.get("currency"),
+                "surface_total": row.get("surface_total"),
+                "address": row.get("address"),
+                "url": row.get("url"),
+            }
+            for row in new_rows
+        ]
+
+        last_run_payload = {
+            "ran_at": started_at_local.isoformat(),
+            "new_count": stats["new"],
+            "total_count": stats["total"],
+            "new_listings": new_listings,
         }
-        for row in new_rows
-    ]
+        LAST_RUN_PATH.write_text(
+            json.dumps(last_run_payload, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        logger.info("last_run.json escrito en %s", LAST_RUN_PATH)
 
-    last_run_payload = {
-        "ran_at": started_at_local.isoformat(),
-        "new_count": stats["new"],
-        "total_count": stats["total"],
-        "new_listings": new_listings,
-    }
-    LAST_RUN_PATH.write_text(
-        json.dumps(last_run_payload, indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
-    logger.info("last_run.json escrito en %s", LAST_RUN_PATH)
+        finished_at = datetime.now(timezone.utc)
+        duration = (finished_at - started_at).total_seconds()
 
-    finished_at = datetime.now(timezone.utc)
-    duration = (finished_at - started_at).total_seconds()
+        logger.info(
+            "Scrape OK: %d listings (%d nuevos, %d actualizados, %d total) en %.1fs",
+            len(listings),
+            stats["new"],
+            stats["updated"],
+            stats["total"],
+            duration,
+        )
 
-    logger.info(
-        "Scrape OK: %d listings (%d nuevos, %d actualizados, %d total) en %.1fs",
-        len(listings),
-        stats["new"],
-        stats["updated"],
-        stats["total"],
-        duration,
-    )
-
-    return {
-        "scraped": len(listings),
-        "new": stats["new"],
-        "updated": stats["updated"],
-        "total_in_db": stats["total"],
-        "duration_seconds": duration,
-        "started_at": started_at.isoformat(),
-        "finished_at": finished_at.isoformat(),
-    }
+        return {
+            "scraped": len(listings),
+            "new": stats["new"],
+            "updated": stats["updated"],
+            "total_in_db": stats["total"],
+            "duration_seconds": duration,
+            "started_at": started_at.isoformat(),
+            "finished_at": finished_at.isoformat(),
+        }
+    finally:
+        await db.close_pg_pool()
 
 
 def main() -> int:

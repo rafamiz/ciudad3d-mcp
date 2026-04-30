@@ -116,7 +116,14 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def _startup() -> None:
+    # init_db() crea el pool de asyncpg si DATABASE_URL está seteada
+    # (Railway), o las tablas SQLite si no (local).
     await db.init_db()
+
+
+@app.on_event("shutdown")
+async def _shutdown() -> None:
+    await db.close_pg_pool()
 
 
 class ChatMessage(BaseModel):
