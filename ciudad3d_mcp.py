@@ -260,6 +260,46 @@ def actualizar_terrenos(max_pages: int = 20) -> dict:
     return _run_async(_run())
 
 
+@mcp.tool()
+def historial_precios(terreno_id: str) -> dict:
+    """
+    Devuelve la evolución de precio de un terreno cacheado: todos los cambios
+    detectados (precio anterior → precio nuevo) ordenados cronológicamente.
+
+    Args:
+        terreno_id: postingId del listing en ZonaProp.
+    """
+    async def _run():
+        await db.init_db()
+        listing = await db.get_terreno_by_id(terreno_id)
+        historial = await db.get_historial_precio(terreno_id)
+        return {
+            "terreno_id": terreno_id,
+            "listing": listing,
+            "cambios": historial,
+            "total_cambios": len(historial),
+        }
+
+    return _run_async(_run())
+
+
+@mcp.tool()
+def terrenos_con_bajas(dias: int = 7) -> dict:
+    """
+    Lista terrenos cuyo precio bajó en los últimos `dias` días, ordenados por
+    la mayor caída absoluta.
+
+    Args:
+        dias: Ventana de días hacia atrás para considerar bajas (default 7).
+    """
+    async def _run():
+        await db.init_db()
+        items = await db.get_terrenos_con_bajas(dias=dias)
+        return {"dias": dias, "count": len(items), "results": items}
+
+    return _run_async(_run())
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     transport = os.getenv("MCP_TRANSPORT", "stdio")
