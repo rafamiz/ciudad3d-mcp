@@ -166,6 +166,7 @@ def buscar_terrenos(
     filters = {k: v for k, v in filters.items() if v is not None}
 
     async def _run():
+        await db.init_db()
         items = await db.get_terrenos(filters=filters, limit=50)
         total = await db.count_terrenos()
         return {"count": len(items), "total_en_db": total, "results": items}
@@ -175,6 +176,7 @@ def buscar_terrenos(
 
 def terreno_detalle(terreno_id: str) -> dict:
     async def _fetch():
+        await db.init_db()
         return await db.get_terreno_by_id(terreno_id)
 
     listing = asyncio.run(_fetch())
@@ -209,6 +211,7 @@ def terreno_detalle(terreno_id: str) -> dict:
 
 def terrenos_con_bajas(dias: int = 7) -> dict:
     async def _run():
+        await db.init_db()
         return await db.get_terrenos_con_bajas(dias=dias)
 
     items = asyncio.run(_run())
@@ -217,6 +220,7 @@ def terrenos_con_bajas(dias: int = 7) -> dict:
 
 def historial_precios(terreno_id: str) -> dict:
     async def _run():
+        await db.init_db()
         listing = await db.get_terreno_by_id(terreno_id)
         cambios = await db.get_historial_precio(terreno_id)
         return listing, cambios
@@ -232,6 +236,7 @@ def historial_precios(terreno_id: str) -> dict:
 
 def generar_informe(terreno_id: str) -> dict:
     async def _fetch():
+        await db.init_db()
         listing = await db.get_terreno_by_id(terreno_id)
         cambios = await db.get_historial_precio(terreno_id)
         return listing, cambios
