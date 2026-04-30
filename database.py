@@ -408,7 +408,10 @@ async def _get_terrenos_pg(
     params: list[Any] = []
 
     def _ph() -> str:
-        return f"${len(params) + 1}"
+        # asyncpg usa placeholders 1-indexados ($1, $2, ...). Llamar a _ph()
+        # SIEMPRE después de params.append(): el último append ocupa el índice
+        # len(params), que es el placeholder correcto.
+        return f"${len(params)}"
 
     if zona := filters.get("zona"):
         like = f"%{zona.lower()}%"
