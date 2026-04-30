@@ -1,11 +1,15 @@
 """
 Scraper de ZonaProp para terrenos en venta en CABA.
 
-Fetcha listados desde https://www.zonaprop.com.ar/terrenos-venta-capital-federal-pagina-{n}.html,
-parsea el JSON embebido en `__NEXT_DATA__` y devuelve listings normalizados.
+Fetcha listados desde https://www.zonaprop.com.ar/terrenos-venta-capital-federal-pagina-{n}.html
+y parsea el JSON embebido en `window.__PRELOADED_STATE__` (variable global de
+ZonaProp con el state inicial del bundle React). Camina a `listStore.listPostings`,
+que es un array de objetos con `postingId`, `priceOperationTypes`, `mainFeatures`,
+`postingLocation`, `visiblePictures`, etc.
 
-Uso async con httpx + BeautifulSoup. Manejo de paginación, delays educados y
-fallback gracioso si el sitio bloquea o cambia el shape del payload.
+Usa `curl_cffi` (asíncrono, drop-in tipo httpx) impersonando Chrome para evadir
+el bloqueo a nivel TLS-fingerprint que aplica ZonaProp a clientes Python "puros".
+Maneja paginación, delays educados (3–7s) y fallback gracioso si bloquean.
 """
 
 from __future__ import annotations
@@ -14,11 +18,11 @@ import asyncio
 import json
 import logging
 import random
+import re
 from datetime import datetime, timezone
-from typing import Any, Iterable
+from typing import Any
 
-import httpx
-from bs4 import BeautifulSoup
+from curl_cffi import requests as cc_requests
 
 logger = logging.getLogger("ciudad3d.scraper")
 
@@ -29,31 +33,20 @@ DEFAULT_MAX_PAGES = 20
 DEFAULT_TIMEOUT = 30.0
 DELAY_RANGE_SECONDS = (3.0, 7.0)
 
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 "
-    "(KHTML, like Gecko) Version/17.4 Safari/605.1.15",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0",
-]
+# curl_cffi impersonation profiles. Rotamos para reducir patterns repetitivos.
+IMPERSONATE_PROFILES = ["chrome124", "chrome120", "chrome110"]
+
+PRELOADED_STATE_RE = re.compile(
+    r"window\.__PRELOADED_STATE__\s*=\s*(\{.*?\});\s*window\.",
+    re.DOTALL,
+)
 
 
-def _headers() -> dict[str, str]:
+def _extra_headers() -> dict[str, str]:
     return {
-        "User-Agent": random.choice(USER_AGENTS),
-        "Accept": (
-            "text/html,application/xhtml+xml,application/xml;q=0.9,"
-            "image/avif,image/webp,*/*;q=0.8"
-        ),
         "Accept-Language": "es-AR,es;q=0.9,en;q=0.8",
-        "Accept-Encoding": "gzip, deflate, br",
         "Cache-Control": "no-cache",
         "Pragma": "no-cache",
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "none",
-        "Sec-Fetch-User": "?1",
-        "Upgrade-Insecure-Requests": "1",
     }
 
 
@@ -61,165 +54,97 @@ async def _polite_sleep() -> None:
     await asyncio.sleep(random.uniform(*DELAY_RANGE_SECONDS))
 
 
-def _parse_next_data(html: str) -> dict[str, Any] | None:
-    """Extrae el JSON del tag <script id="__NEXT_DATA__">."""
-    soup = BeautifulSoup(html, "html.parser")
-    tag = soup.find("script", id="__NEXT_DATA__")
-    if tag is None or not tag.string:
+def _parse_preloaded_state(html: str) -> dict[str, Any] | None:
+    """Extrae y parsea `window.__PRELOADED_STATE__` del HTML."""
+    m = PRELOADED_STATE_RE.search(html)
+    if not m:
         return None
     try:
-        return json.loads(tag.string)
+        return json.loads(m.group(1))
     except json.JSONDecodeError as e:
-        logger.warning("No pude parsear __NEXT_DATA__: %s", e)
+        logger.warning("No pude parsear __PRELOADED_STATE__: %s", e)
         return None
 
 
-def _walk_for_listings(node: Any) -> Iterable[dict[str, Any]]:
-    """
-    Camina el tree del NEXT_DATA buscando objetos que se vean como listings.
-    El shape de ZonaProp varía: a veces es `props.pageProps.listings`, otras
-    `props.pageProps.initialProps.listingsResult.listings`. Ser tolerantes.
-    """
-    if isinstance(node, dict):
-        if (
-            "postingId" in node
-            or ("id" in node and "priceOperationTypes" in node)
-            or ("postingId" in node and "title" in node)
-        ):
-            yield node
-            return
-        for v in node.values():
-            yield from _walk_for_listings(v)
-    elif isinstance(node, list):
-        for item in node:
-            yield from _walk_for_listings(item)
-
-
-def _first(d: dict | None, *keys: str) -> Any:
-    """Devuelve el primer valor no-None entre las claves dadas."""
-    if not isinstance(d, dict):
+def _to_float(x: Any) -> float | None:
+    if x is None:
         return None
-    for k in keys:
-        v = d.get(k)
-        if v not in (None, "", []):
-            return v
-    return None
+    if isinstance(x, (int, float)):
+        return float(x)
+    s = str(x).replace(",", ".").strip()
+    s = "".join(c for c in s if c.isdigit() or c == ".")
+    try:
+        return float(s) if s else None
+    except ValueError:
+        return None
 
 
 def _extract_price(raw: dict[str, Any]) -> tuple[float | None, str | None]:
-    """Devuelve (price, currency). Tolera múltiples shapes."""
     pot = raw.get("priceOperationTypes")
     if isinstance(pot, list) and pot:
         prices = pot[0].get("prices") if isinstance(pot[0], dict) else None
         if isinstance(prices, list) and prices:
             p = prices[0]
-            amount = _first(p, "amount", "value", "price")
-            currency = _first(p, "currency", "currencySymbol")
-            try:
-                return (float(amount) if amount is not None else None, currency)
-            except (TypeError, ValueError):
-                return (None, currency)
-
-    expenses = _first(raw, "expenses")
-    amount = _first(raw, "price", "priceAmount", "amount")
-    currency = _first(raw, "currency", "priceCurrency")
-    try:
-        return (float(amount) if amount is not None else None, currency)
-    except (TypeError, ValueError):
-        return (None, currency)
+            return _to_float(p.get("amount")), p.get("currency")
+    return None, None
 
 
-def _extract_surfaces(raw: dict[str, Any]) -> tuple[float | None, float | None]:
-    """Devuelve (surface_total, surface_covered)."""
-
-    def _to_float(x: Any) -> float | None:
-        if x is None:
-            return None
-        if isinstance(x, (int, float)):
-            return float(x)
-        s = str(x).replace(",", ".").strip()
-        s = "".join(c for c in s if c.isdigit() or c == ".")
-        try:
-            return float(s) if s else None
-        except ValueError:
-            return None
-
-    total = _to_float(_first(raw, "totalSurface", "surfaceTotal", "surface"))
-    covered = _to_float(_first(raw, "coveredSurface", "surfaceCovered"))
-
-    if total is None and isinstance(raw.get("mainFeatures"), dict):
-        feats = raw["mainFeatures"]
-        for key in ("CFT100", "totalSurface"):
-            if key in feats:
-                total = _to_float(feats[key].get("value") if isinstance(feats[key], dict) else feats[key])
-                if total is not None:
-                    break
-    return total, covered
-
-
-def _extract_coords(raw: dict[str, Any]) -> tuple[float | None, float | None]:
-    """Devuelve (lat, lng) tolerando múltiples shapes."""
-    geo = raw.get("postingLocation") or raw.get("location") or {}
-    if isinstance(geo, dict):
-        coords = geo.get("postingGeolocation") or geo.get("geolocation") or geo
-        if isinstance(coords, dict):
-            lat = _first(coords, "latitude", "lat")
-            lng = _first(coords, "longitude", "lng", "lon")
-            try:
-                return (
-                    float(lat) if lat is not None else None,
-                    float(lng) if lng is not None else None,
-                )
-            except (TypeError, ValueError):
-                pass
-
-    lat = _first(raw, "latitude", "lat")
-    lng = _first(raw, "longitude", "lng", "lon")
-    try:
-        return (
-            float(lat) if lat is not None else None,
-            float(lng) if lng is not None else None,
-        )
-    except (TypeError, ValueError):
-        return (None, None)
+def _extract_surface_from_main_features(raw: dict[str, Any], feature_id: str) -> float | None:
+    feats = raw.get("mainFeatures")
+    if not isinstance(feats, dict):
+        return None
+    node = feats.get(feature_id)
+    if isinstance(node, dict):
+        return _to_float(node.get("value"))
+    return None
 
 
 def _extract_address(raw: dict[str, Any]) -> str | None:
-    loc = raw.get("postingLocation") or raw.get("location") or {}
+    loc = raw.get("postingLocation")
+    if not isinstance(loc, dict):
+        return None
+    addr = loc.get("address")
+    if isinstance(addr, dict):
+        name = addr.get("name")
+        if name:
+            barrio = None
+            inner = loc.get("location")
+            if isinstance(inner, dict):
+                barrio = inner.get("name")
+            if barrio:
+                return f"{name}, {barrio}"
+            return name
+    return None
+
+
+def _extract_coords(raw: dict[str, Any]) -> tuple[float | None, float | None]:
+    loc = raw.get("postingLocation")
     if isinstance(loc, dict):
-        addr = _first(
-            loc,
-            "address",
-            "addressName",
-            "name",
-            "fullAddress",
-            "shortLocation",
-        )
-        if isinstance(addr, dict):
-            return _first(addr, "name", "value")
-        if addr:
-            return str(addr)
-    return _first(raw, "address", "addressName", "fullAddress")
+        geo = loc.get("postingGeolocation")
+        if isinstance(geo, dict):
+            inner = geo.get("geolocation")
+            if isinstance(inner, dict):
+                return _to_float(inner.get("latitude")), _to_float(inner.get("longitude"))
+    return None, None
 
 
 def _extract_first_photo(raw: dict[str, Any]) -> str | None:
-    photos = (
-        raw.get("postingPicturesUrl")
-        or raw.get("postingPictures")
-        or raw.get("pictures")
-        or raw.get("media")
-    )
-    if isinstance(photos, list) and photos:
-        first = photos[0]
-        if isinstance(first, str):
-            return first
-        if isinstance(first, dict):
-            return _first(first, "url", "image", "src", "originalUrl")
-    return _first(raw, "thumbnail", "mainPicture")
+    vp = raw.get("visiblePictures")
+    if isinstance(vp, dict):
+        pics = vp.get("pictures")
+        if isinstance(pics, list) and pics and isinstance(pics[0], dict):
+            for key in ("url730x532", "url360x266", "url130x70"):
+                url = pics[0].get(key)
+                if url:
+                    return url
+    house = raw.get("house")
+    if isinstance(house, dict):
+        return house.get("image")
+    return None
 
 
 def _extract_url(raw: dict[str, Any]) -> str | None:
-    url = _first(raw, "url", "permalink", "publicUrl", "shareUrl")
+    url = raw.get("url")
     if not url:
         return None
     if url.startswith("http"):
@@ -230,43 +155,42 @@ def _extract_url(raw: dict[str, Any]) -> str | None:
 
 
 def normalize_listing(raw: dict[str, Any]) -> dict[str, Any] | None:
-    """Convierte un objeto listing crudo en el shape que persistimos."""
-    listing_id = _first(raw, "postingId", "id")
+    """Convierte un objeto listing crudo de ZonaProp en el shape que persistimos."""
+    listing_id = raw.get("postingId") or raw.get("id")
     if not listing_id:
         return None
 
     price, currency = _extract_price(raw)
-    surface_total, surface_covered = _extract_surfaces(raw)
     lat, lng = _extract_coords(raw)
 
     return {
         "id": str(listing_id),
-        "title": _first(raw, "title", "postingTitle", "name") or "",
+        "title": raw.get("title") or raw.get("generatedTitle") or "",
         "price": price,
         "currency": currency,
-        "surface_total": surface_total,
-        "surface_covered": surface_covered,
+        "surface_total": _extract_surface_from_main_features(raw, "CFT100"),
+        "surface_covered": _extract_surface_from_main_features(raw, "CFT101"),
         "address": _extract_address(raw),
         "lat": lat,
         "lng": lng,
         "url": _extract_url(raw),
-        "description": _first(raw, "description", "postingDescription"),
+        "description": raw.get("descriptionNormalized") or raw.get("iadescription"),
         "photos": _extract_first_photo(raw),
         "scraped_at": datetime.now(timezone.utc).isoformat(),
     }
 
 
 async def fetch_page(
-    client: httpx.AsyncClient, page: int
+    session: cc_requests.AsyncSession, page: int
 ) -> tuple[list[dict[str, Any]], bool]:
     """
     Devuelve (listings_normalizados, has_more).
-    has_more = False si la página vino vacía o bloqueada (cortar paginación).
+    has_more=False si la página vino vacía o bloqueada (cortar paginación).
     """
     url = LISTING_URL_TEMPLATE.format(page=page)
     try:
-        resp = await client.get(url, headers=_headers(), timeout=DEFAULT_TIMEOUT)
-    except httpx.HTTPError as e:
+        resp = await session.get(url, headers=_extra_headers(), timeout=DEFAULT_TIMEOUT)
+    except Exception as e:
         logger.warning("Error de red en página %d: %s", page, e)
         return [], False
 
@@ -277,18 +201,28 @@ async def fetch_page(
         logger.warning("Status %s en página %d", resp.status_code, page)
         return [], False
 
-    data = _parse_next_data(resp.text)
-    if data is None:
-        logger.warning("Sin __NEXT_DATA__ en página %d", page)
+    state = _parse_preloaded_state(resp.text)
+    if state is None:
+        logger.warning("Sin __PRELOADED_STATE__ en página %d", page)
         return [], False
 
-    raw_listings = list(_walk_for_listings(data))
-    normalized = []
-    seen_ids: set[str] = set()
+    list_store = state.get("listStore")
+    if not isinstance(list_store, dict):
+        logger.warning("listStore ausente en página %d", page)
+        return [], False
+
+    raw_listings = list_store.get("listPostings") or []
+    if not isinstance(raw_listings, list):
+        return [], False
+
+    normalized: list[dict[str, Any]] = []
+    seen: set[str] = set()
     for raw in raw_listings:
+        if not isinstance(raw, dict):
+            continue
         norm = normalize_listing(raw)
-        if norm and norm["id"] not in seen_ids:
-            seen_ids.add(norm["id"])
+        if norm and norm["id"] not in seen:
+            seen.add(norm["id"])
             normalized.append(norm)
 
     return normalized, len(normalized) > 0
@@ -297,9 +231,11 @@ async def fetch_page(
 async def scrape(max_pages: int = DEFAULT_MAX_PAGES) -> list[dict[str, Any]]:
     """Scrapea hasta `max_pages` páginas y devuelve todos los listings únicos."""
     all_listings: dict[str, dict[str, Any]] = {}
-    async with httpx.AsyncClient(follow_redirects=True) as client:
+    impersonate = random.choice(IMPERSONATE_PROFILES)
+
+    async with cc_requests.AsyncSession(impersonate=impersonate) as session:
         for page in range(1, max_pages + 1):
-            listings, has_more = await fetch_page(client, page)
+            listings, has_more = await fetch_page(session, page)
             logger.info("Página %d: %d listings", page, len(listings))
             for item in listings:
                 all_listings[item["id"]] = item
