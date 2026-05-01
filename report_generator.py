@@ -649,7 +649,8 @@ def _build_section_potencial(listing: dict, gcba: dict, styles: dict) -> list:
 
     # Preferir la superficie de parcela del CUR (más precisa) si existe
     sup_parcela_cur = _safe_get(edif, "superficie_parcela") if isinstance(edif, dict) else None
-    surface_for_calc = surface if surface is not None else sup_parcela_cur
+    # Fallback al CUR si surface es None, 0 o falsy.
+    surface_for_calc = surface if surface else sup_parcela_cur
 
     elements: list = [Paragraph("4. Análisis de potencial constructivo", styles["h2"])]
 
@@ -761,7 +762,8 @@ def _build_section_escenarios(listing: dict, gcba: dict, styles: dict) -> list:
 
     surface = listing.get("surface_total")
     sup_parcela_cur = _safe_get(edif, "superficie_parcela") if isinstance(edif, dict) else None
-    surface_for_calc = surface if surface is not None else sup_parcela_cur
+    # Fallback al CUR si surface es None, 0 o falsy.
+    surface_for_calc = surface if surface else sup_parcela_cur
     try:
         surface_f = float(surface_for_calc) if surface_for_calc is not None else None
     except (TypeError, ValueError):
