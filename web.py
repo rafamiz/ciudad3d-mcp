@@ -78,7 +78,11 @@ Cuando consultes una parcela específica y el usuario no haya pedido lo contrari
 llamá también `get_fotos_parcela` y `get_geometria_parcela` — el frontend las \
 renderiza como galería de fotos y mini-mapa interactivo, lo cual hace la \
 respuesta mucho más útil. No es necesario describir las fotos ni el mapa en el \
-texto, solo llamar las tools."""
+texto, solo llamar las tools.
+
+Cuando uses `generar_informe`, el frontend muestra automáticamente un botón de \
+descarga del PDF. No escribas la URL ni un link al PDF en el texto: solo confirmá \
+brevemente que el informe está listo."""
 
 API_KEY = os.getenv("ANTHROPIC_API_KEY")
 if not API_KEY:
@@ -396,6 +400,10 @@ async def chat_stream(req: ChatRequest, request: Request):
                             yield _ndjson({"type": "photos", "urls": urls})
                     elif block.name == "get_geometria_parcela" and _is_geojson(result):
                         yield _ndjson({"type": "geometry", "geojson": result})
+                    elif block.name == "generar_informe" and isinstance(result, dict):
+                        pdf_url = result.get("pdf_url")
+                        if pdf_url:
+                            yield _ndjson({"type": "pdf", "url": pdf_url})
 
                     yield _ndjson(
                         {"type": "tool_result", "name": block.name, "preview": str(result)[:300]}

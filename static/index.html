@@ -589,6 +589,43 @@
     }
     .map { height: 300px; background: var(--surface-2); }
 
+    /* Report download card */
+    .report-card {
+      align-self: flex-start;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      max-width: 78%;
+      margin-left: 44px;
+      padding: 14px 16px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow-sm);
+      text-decoration: none;
+      color: var(--text);
+      transition: border-color .15s, box-shadow .15s;
+    }
+    .report-card:hover {
+      border-color: var(--accent);
+      box-shadow: var(--shadow-md, var(--shadow-sm));
+    }
+    .report-card .icon {
+      flex: none;
+      width: 40px;
+      height: 40px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 10px;
+      background: var(--accent-soft);
+      color: var(--accent);
+    }
+    .report-card .icon svg { width: 22px; height: 22px; }
+    .report-card .meta { display: flex; flex-direction: column; gap: 2px; }
+    .report-card .meta .name { font-weight: 600; font-size: 14px; }
+    .report-card .meta .sub { font-size: 12px; color: var(--muted); }
+
     /* Typing indicator (animated dots) */
     .typing {
       align-self: flex-start;
@@ -709,14 +746,14 @@
       header.chat-header { padding: 14px 16px; }
       .composer-wrap { padding: 12px 16px 18px; }
       .msg { max-width: 88%; }
-      .tools, .photos, .map-wrap { max-width: 88%; margin-left: 44px; }
+      .tools, .photos, .map-wrap, .report-card { max-width: 88%; margin-left: 44px; }
       .hero h3 { font-size: 22px; }
     }
 
     @media (max-width: 480px) {
       .msg-row { gap: 8px; }
       .avatar { width: 28px; height: 28px; }
-      .tools, .photos, .map-wrap { margin-left: 36px; }
+      .tools, .photos, .map-wrap, .report-card { margin-left: 36px; }
     }
   </style>
 </head>
@@ -977,6 +1014,33 @@
       });
     }
 
+    function addReport(url, filename) {
+      hideHero();
+      // Resolve against the current origin so it never points to localhost.
+      const href = new URL(url, window.location.origin).href;
+      const name = filename || decodeURIComponent(href.split('/').pop()) || 'informe.pdf';
+      const card = document.createElement('a');
+      card.className = 'report-card';
+      card.href = href;
+      card.target = '_blank';
+      card.rel = 'noopener noreferrer';
+      card.innerHTML = `
+        <span class="icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+            <path d="M14 2v6h6"/>
+            <path d="M12 18v-6"/>
+            <path d="M9 15l3 3 3-3"/>
+          </svg>
+        </span>
+        <span class="meta">
+          <span class="name">${escapeHtml(name)}</span>
+          <span class="sub">Descargar informe PDF</span>
+        </span>`;
+      chat.appendChild(card);
+      scrollToBottom();
+    }
+
     // Typing indicator
     function showTyping() {
       hideHero();
@@ -1059,6 +1123,12 @@
             this.bubbleRow = null;
             this.toolsBox = null;
             addMap(evt.geojson);
+            break;
+          case 'pdf':
+            this.bubble = null;
+            this.bubbleRow = null;
+            this.toolsBox = null;
+            addReport(evt.url, evt.filename);
             break;
           case 'text': {
             if (!this.bubble) {
